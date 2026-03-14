@@ -9,7 +9,7 @@ Define structure once; get purpose, public API, and dependencies per folder — 
 Requires **Python 3.10+** and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv tool install git+https://github.com/YOUR_ORG/hierarchical-context-compressor.git
+uv tool install git+https://github.com/reyavir/hierarchical-context-compressor.git
 ```
 
 This installs the **`hcc`** command globally.
@@ -25,7 +25,7 @@ uv tool uninstall hierarchical-context-compressor
 To work on the tool itself, clone the repo and sync dependencies:
 
 ```bash
-git clone https://github.com/YOUR_ORG/hierarchical-context-compressor.git
+git clone https://github.com/reyavir/hierarchical-context-compressor.git
 cd hierarchical-context-compressor
 uv sync
 ```
@@ -67,5 +67,3 @@ uv run pytest
 pip install -r requirements.txt
 python -m src.main --root /path/to/your/repo
 ```
-
-Replace `YOUR_ORG` in the git URLs with your GitHub org or username once the repo is pushed.
