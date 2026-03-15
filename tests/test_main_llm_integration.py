@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from src.main import (
     _parse_directory_selection,
     _parse_discovery_paths,
+    _classify_directory,
+    _get_system_prompt_for_type,
     generate_agents_md_with_llm,
     build_agents_md_contents,
     write_context_files,
@@ -40,6 +42,32 @@ def test_parse_directory_selection_skips_invalid(tmp_path: Path) -> None:
     assert tmp_path in out
     assert (tmp_path / "real") in out
     assert len(out) == 2
+
+
+def test_classify_directory(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "docs").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "scripts").mkdir()
+    type_key, persona, desc = _classify_directory(repo / "docs", repo)
+    assert type_key == "docs"
+    assert "Technical Writer" in persona
+    type_key, persona, desc = _classify_directory(repo / "tests", repo)
+    assert type_key == "tests"
+    assert "QA" in persona
+    type_key, persona, desc = _classify_directory(repo / "scripts", repo)
+    assert type_key == "infra"
+    type_key, persona, desc = _classify_directory(repo / "src", repo)
+    assert type_key == "core"
+    assert "Engineer" in persona
+    # Fallback: folder that doesn't fit docs/tests/infra/core -> generic
+    (repo / "misc").mkdir()
+    (repo / "misc" / "readme.txt").write_text("hi", encoding="utf-8")
+    type_key, persona, desc = _classify_directory(repo / "misc", repo)
+    assert type_key == "generic"
+    assert "Agent" in persona or "General" in persona
 
 
 def test_parse_discovery_paths(tmp_path: Path) -> None:
@@ -78,6 +106,26 @@ def test_generate_agents_md_with_llm_nested(tmp_path: Path) -> None:
     )
     assert "## Setup & Commands" in out
     assert "Local Agent Context" in out
+
+
+def test_get_system_prompt_for_type_uses_template_when_provided(tmp_path: Path) -> None:
+    """When --templates-dir contains docs.md (or docs.txt), that content is used for docs type."""
+    templates_dir = tmp_path / "templates"
+    templates_dir.mkdir()
+    (templates_dir / "docs.md").write_text("You are a custom docs template. Focus on xyz.", encoding="utf-8")
+    out = _get_system_prompt_for_type("docs", templates_dir)
+    assert "custom docs template" in out
+    assert "xyz" in out
+    # Other types still use built-in when no template file
+    out_core = _get_system_prompt_for_type("core", templates_dir)
+    assert "Senior Lead Engineer" in out_core
+
+
+def test_get_system_prompt_for_type_fallback_without_templates_dir() -> None:
+    """Without templates_dir, built-in prompt is used."""
+    out = _get_system_prompt_for_type("docs", None)
+    assert "Technical Writer" in out
+    assert "Operational Manual" in out
 
 
 def test_generate_agents_md_with_llm_no_client(tmp_path: Path) -> None:

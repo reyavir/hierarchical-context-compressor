@@ -58,6 +58,7 @@ uv run pytest
 | `--model` | — | Use this model for both discovery and generation (overrides the two above). |
 | `--base-url` | — | Custom API base URL (e.g. LiteLLM proxy). |
 | `--dry-run` | `false` | Do not write files; print a tree view. |
+| `--templates-dir` | — | Directory with optional per-type templates: `docs.md`, `tests.md`, `core.md`, `infra.md`, `generic.md`. If present, the file content is used as the system prompt for that directory type (e.g. for docs folders use your own “xyz” template). |
 
 **Environment**
 
@@ -86,7 +87,14 @@ OPENAI_BASE_URL=http://localhost:4000 hcc --root /path/to/repo
    hcc --root /path/to/your/repo --dry-run
    ```
 
-3. **Optional: LLM generation**  
+3. **Optional: Custom templates per type**  
+   For a given directory type (e.g. docs), you can supply your own system prompt. Create a directory (e.g. `.hcc/templates`) and add files named by type: `docs.md`, `tests.md`, `core.md`, `infra.md`, or `generic.md`. The content of that file is used as the LLM system prompt when generating AGENTS.md for that type. Example: for docs folders, put your “xyz” template in `.hcc/templates/docs.md` and run:
+
+   ```bash
+   hcc --root /path/to/repo --templates-dir .hcc/templates
+   ```
+
+4. **Optional: LLM generation**  
    Set `OPENAI_API_KEY` in your environment, or add a `.env` file in the project root (see `.gitignore`; never commit it).
 
 ## Traditional pip

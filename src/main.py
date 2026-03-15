@@ -48,6 +48,144 @@ You MAY use these level-2 headers when (and only when) you have concrete, eviden
 
 Use at most the three headers above. If you have no strong signal for a section, leave it out entirely. Be concise; bullets over paragraphs."""
 
+# --- Directory type classification and type-specific prompts ---
+# Type -> (display name, persona name, persona description for header)
+DIRECTORY_TYPE_META: Dict[str, tuple[str, str, str]] = {
+    "core": ("Core", "Senior Lead Engineer", "Architectural rules, exported APIs, and strict logic boundaries."),
+    "docs": ("Docs", "Technical Writer", "Tone of voice, formatting rules (Markdown/Docusaurus), and link-checking commands."),
+    "tests": ("Tests", "QA Engineer", "Test coverage requirements, mock patterns, and how to run specific suites."),
+    "infra": ("Infra", "DevOps Specialist", "Environment variables, deployment safety, and CLI flag explanations."),
+    "generic": ("General", "Agent", "No specific role; extract setup, style, and implementation details from the tree and files."),
+}
+
+# Type -> full system prompt for generation (persona + boundary + what to extract)
+TYPE_SYSTEM_PROMPTS: Dict[str, str] = {
+    "core": """You are writing an Operational Manual for a **Senior Lead Engineer** in this directory (core/source code). Focus on: architectural rules, exported APIs, and strict logic boundaries. Extract USEFUL, SPECIFIC information only; every bullet must reference a concrete file path, command, or symbol (in backticks).
+
+**Boundary:** This agent owns production code. Preserve exported APIs and architectural contracts; do not suggest breaking changes without calling out impact.
+
+You MAY use these level-2 headers only when you have evidence-backed content:
+## Setup & Commands — Exact build/run commands from package.json, Makefile, pyproject.toml (e.g. `npm run build`, `uv run dev`). Omit if none.
+## Code Style & Patterns — Concrete patterns with file/symbol references (e.g. `src/api/user.py:get_user`). Omit if no clear signals.
+## Implementation Details — Entrypoints (`main.py`, `app.py`), module boundaries, key imports. Omit if nothing beyond the tree.
+
+Leave out any section that has no unique signal. No generic phrases without a concrete example.""",
+
+    "docs": """You are writing an Operational Manual for a **Technical Writer** in this directory (documentation). Focus on: tone of voice, formatting rules (Markdown/Docusaurus/etc.), and link-checking or lint-docs commands. Extract USEFUL, SPECIFIC information only; every bullet must reference a concrete path or command (in backticks).
+
+**Boundary:** Only write in Markdown; do not suggest code changes to application source. Stay within docs tooling and structure.
+
+You MAY use these level-2 headers only when you have evidence-backed content:
+## Setup & Commands — How to build/serve the docs site, lint-docs, link-check (e.g. `npm run docs:build`, `mkdocs serve`). Omit if none.
+## Code Style & Patterns — Doc formatting rules, sidebar structure, cross-linking conventions. Omit if no clear signals.
+## Implementation Details — Docs framework (Docusaurus, MkDocs), config file location, asset layout. Omit if nothing specific.
+
+Leave out any section that has no unique signal. No generic phrases without a concrete example.""",
+
+    "tests": """You are writing an Operational Manual for a **QA Engineer** in this directory (tests). Focus on: test framework used, how to run tests, and mocking strategy. Extract USEFUL, SPECIFIC information only; every bullet must reference a concrete path or command (in backticks).
+
+**Boundary:** Never modify source code to make tests pass. Only change test code, fixtures, or config. Preserve intended behavior.
+
+You MAY use these level-2 headers only when you have evidence-backed content:
+## Setup & Commands — How to run tests (e.g. `pytest tests/`, `npm run test`, `jest --config`). Include filter flags for specific suites. Omit if none.
+## Code Style & Patterns — Test naming, mock patterns (e.g. `tests/conftest.py`, `jest.mock`). Omit if no clear signals.
+## Implementation Details — Test layout, fixtures, coverage config. Omit if nothing specific.
+
+Leave out any section that has no unique signal. No generic phrases without a concrete example.""",
+
+    "infra": """You are writing an Operational Manual for a **DevOps Specialist** in this directory (scripts/infra). Focus on: environment variables, deployment safety, and CLI flag explanations. Extract USEFUL, SPECIFIC information only; every bullet must reference a concrete path or command (in backticks).
+
+**Boundary:** Do not change application code. Only modify scripts, Docker, CI, or Terraform. Call out destructive or irreversible actions.
+
+You MAY use these level-2 headers only when you have evidence-backed content:
+## Setup & Commands — How to run scripts, deploy, or validate (e.g. `docker build`, `terraform plan`). Include required env vars. Omit if none.
+## Code Style & Patterns — Script conventions, config file locations. Omit if no clear signals.
+## Implementation Details — Pipeline stages, secrets handling, rollback steps. Omit if nothing specific.
+
+Leave out any section that has no unique signal. No generic phrases without a concrete example.""",
+
+    "generic": """You are writing an Operational Manual for an AI agent in this directory. No specific persona—extract whatever is useful from the file tree and contents. Every bullet must reference a concrete file path, command, or symbol (in backticks). No broad or vague statements.
+
+You MAY use these level-2 headers only when you have evidence-backed content:
+## Setup & Commands — Runnable commands from config files (package.json, Makefile, etc.). Omit if none.
+## Code Style & Patterns — Concrete patterns with file/symbol references. Omit if no clear signals.
+## Implementation Details — Entrypoints, key modules, how things are wired. Omit if nothing specific.
+
+Leave out any section that has no unique signal. No generic phrases without a concrete example.""",
+}
+
+
+def _get_system_prompt_for_type(type_key: str, templates_dir: Optional[Path] = None) -> str:
+    """
+    Return the system prompt for a directory type. If templates_dir is set and contains
+    {type_key}.md or {type_key}.txt, use that file's content; otherwise use TYPE_SYSTEM_PROMPTS.
+    """
+    if templates_dir is not None and templates_dir.is_dir():
+        for ext in (".md", ".txt"):
+            path = templates_dir / f"{type_key}{ext}"
+            if path.is_file():
+                return path.read_text(encoding="utf-8", errors="replace").strip()
+    return TYPE_SYSTEM_PROMPTS.get(type_key, AGENTS_MD_SYSTEM_PROMPT)
+
+
+def _classify_directory(dir_path: Path, repo_root: Path) -> tuple[str, str, str]:
+    """
+    Classify directory into type based on path and contents. Returns (type_key, persona_name, persona_description).
+    Order: infra -> docs -> tests -> core (default).
+    """
+    try:
+        rel_parts = dir_path.resolve().relative_to(repo_root.resolve()).parts
+    except ValueError:
+        rel_parts = ()
+    path_lower = "/".join(rel_parts).lower()
+    try:
+        names = {p.name.lower() for p in dir_path.iterdir()}
+        files = [p.name.lower() for p in dir_path.iterdir() if p.is_file()]
+    except OSError:
+        names = set()
+        files = []
+
+    # INFRA: path has scripts, infra, terraform; or has Dockerfile, .yml
+    if any(p in path_lower for p in ("scripts", "infra", "terraform", ".github")):
+        meta = DIRECTORY_TYPE_META["infra"]
+        return ("infra", meta[1], meta[2])
+    if "dockerfile" in names or any(f.endswith(".yml") or f.endswith(".yaml") for f in files):
+        meta = DIRECTORY_TYPE_META["infra"]
+        return ("infra", meta[1], meta[2])
+
+    # DOCS: path has docs; or directory is mostly .md files
+    if "docs" in path_lower:
+        meta = DIRECTORY_TYPE_META["docs"]
+        return ("docs", meta[1], meta[2])
+    md_count = sum(1 for f in files if f.endswith(".md"))
+    if md_count >= 2 and len(files) <= 10:
+        meta = DIRECTORY_TYPE_META["docs"]
+        return ("docs", meta[1], meta[2])
+
+    # TESTS: path has tests, test, spec; or files like test_*.py, *.spec.*
+    if any(p in path_lower for p in ("tests", "test", "spec", "__tests__")):
+        meta = DIRECTORY_TYPE_META["tests"]
+        return ("tests", meta[1], meta[2])
+    if any(f.startswith("test_") or ".spec." in f for f in files):
+        meta = DIRECTORY_TYPE_META["tests"]
+        return ("tests", meta[1], meta[2])
+
+    # CORE: only if strong signal—path is a known source root or dir has multiple source files
+    source_roots = ("src", "app", "lib", "core", "packages", "pkg")
+    if any(p in path_lower for p in source_roots):
+        meta = DIRECTORY_TYPE_META["core"]
+        return ("core", meta[1], meta[2])
+    source_extensions = (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java")
+    source_count = sum(1 for f in files if any(f.endswith(ext) for ext in source_extensions))
+    if source_count >= 2:
+        meta = DIRECTORY_TYPE_META["core"]
+        return ("core", meta[1], meta[2])
+
+    # GENERIC: fallback when nothing clearly fits (misc folders, config-only, single file, etc.)
+    meta = DIRECTORY_TYPE_META["generic"]
+    return ("generic", meta[1], meta[2])
+
+
 # Caps
 MAX_DIRS_PHASE1 = 15
 MAX_PATHS_DISCOVERY = 20
@@ -292,6 +430,7 @@ def generate_agents_md_with_llm(
     tree_text: str,
     discovered_contents: Dict[str, str],
     is_root: bool,
+    templates_dir: Optional[Path] = None,
 ) -> str:
     """
     Generate AGENTS.md content for one directory. Root uses ToC prompt; nested uses three-section prompt.
@@ -299,14 +438,23 @@ def generate_agents_md_with_llm(
     """
     rel = dir_path.relative_to(repo_root).as_posix() if dir_path != repo_root else "."
 
-    if client is None:
-        body = "## Table of contents\n\n_No LLM available._\n\n## Setup & Commands\n\n_No content._\n\n## Code Style & Patterns\n\n_No content._\n\n## Implementation Details\n\n_No content._"
-        if not is_root:
-            body = "## Setup & Commands\n\nNo scripts or makefiles detected.\n\n## Code Style & Patterns\n\n_Infer from file tree._\n\n## Implementation Details\n\n_No content._"
+    # Type-aware prompt for non-root; optional user templates override built-in
+    if is_root:
+        system_prompt = ROOT_AGENTS_MD_SYSTEM_PROMPT
+    else:
+        type_key, _, _ = _classify_directory(dir_path, repo_root)
+        system_prompt = _get_system_prompt_for_type(type_key, templates_dir)
+
+    def _wrap(body: str) -> str:
         return wrap_agents_md_header(dir_path, repo_root, body)
 
+    if client is None:
+        body = "## Table of contents\n\n_No LLM available._"
+        if not is_root:
+            body = "## Setup & Commands\n\nNo scripts or makefiles detected."
+        return _wrap(body)
+
     user_content = _build_user_message(dir_path, repo_root, tree_text, discovered_contents)
-    system_prompt = ROOT_AGENTS_MD_SYSTEM_PROMPT if is_root else AGENTS_MD_SYSTEM_PROMPT
     try:
         resp = client.chat.completions.create(
             model=generation_model,
@@ -319,17 +467,13 @@ def generate_agents_md_with_llm(
         content = (resp.choices[0].message.content or "").strip()
         if not content:
             raise ValueError("Empty response")
-        # First drop obviously generic bullets, then prune whole sections that
-        # don't carry any concrete signal.
         content = _drop_generic_bullets(content)
         content = _prune_sections(content)
-        return wrap_agents_md_header(dir_path, repo_root, content)
+        return _wrap(content)
     except Exception as exc:
         console.print(f"[yellow]Generation failed for {rel}: {exc}[/yellow]")
-        body = "## Setup & Commands\n\n_Generation failed._\n\n## Code Style & Patterns\n\n_No content._\n\n## Implementation Details\n\n_No content._"
-        if is_root:
-            body = "## Table of contents\n\n_Generation failed._"
-        return wrap_agents_md_header(dir_path, repo_root, body)
+        body = "## Table of contents\n\n_Generation failed._" if is_root else "## Setup & Commands\n\n_Generation failed._"
+        return _wrap(body)
 
 
 def build_agents_md_contents(
@@ -338,6 +482,7 @@ def build_agents_md_contents(
     client: Optional[OpenAI],
     discovery_model: str,
     generation_model: str,
+    templates_dir: Optional[Path] = None,
 ) -> tuple[Dict[Path, str], Dict[Path, str]]:
     """
     Run phase 2 and 3 for each selected dir. Returns (agents_md_contents, folder_summaries).
@@ -357,6 +502,7 @@ def build_agents_md_contents(
             tree_text,
             discovered,
             is_root=is_root,
+            templates_dir=templates_dir,
         )
         contents[dir_path] = content
         first_line = content.split("\n")[2] if "\n" in content else content[:80]
@@ -460,6 +606,13 @@ def _merge_with_existing_agents_md(path: Path, regenerated: str) -> str:
     default=False,
     help="Do not write files; print a tree view of the computed context.",
 )
+@click.option(
+    "--templates-dir",
+    "templates_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Directory with optional per-type templates: docs.md, tests.md, core.md, infra.md, generic.md. If present, used as the system prompt for that directory type.",
+)
 def cli(
     root_dir: Path,
     discovery_model: str,
@@ -467,6 +620,7 @@ def cli(
     model: Optional[str],
     base_url: Optional[str],
     dry_run: bool,
+    templates_dir: Optional[Path],
 ) -> None:
     """Generate a hierarchical context map for a codebase (agents.md + AGENTS.md)."""
     if model:
@@ -482,7 +636,7 @@ def cli(
     console.print(f"[dim]Selected {len(selected_dirs)} directories for AGENTS.md[/dim]")
 
     agents_md_contents, folder_summaries = build_agents_md_contents(
-        repo_root, selected_dirs, client, discovery_model, generation_model
+        repo_root, selected_dirs, client, discovery_model, generation_model, templates_dir
     )
 
     if dry_run:
