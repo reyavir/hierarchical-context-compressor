@@ -124,10 +124,30 @@ def test_write_context_files_emits_agents_md(tmp_path: Path) -> None:
     assert "table of contents" in (repo / "agents.md").read_text(encoding="utf-8").lower() or "Repository index" in (repo / "agents.md").read_text(encoding="utf-8")
 
 
+def test_write_context_files_backend_only_no_llms_txt(tmp_path: Path) -> None:
+    """Backend-only repo (e.g. FastAPI API) does not get llms.txt."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "api"\ndependencies = ["fastapi"]',
+        encoding="utf-8",
+    )
+    (repo / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()", encoding="utf-8")
+    selected = [repo]
+    contents = {repo: "### Local Agent Context\n\n## Scope\n\n..."}
+    summaries = {repo: "Root"}
+    write_context_files(repo, selected, contents, summaries)
+    assert (repo / "agents.md").exists()
+    assert not (repo / "llms.txt").exists()
+
+
 def test_write_context_files_web_app_emits_llms_txt(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "package.json").write_text('{"scripts":{"start":"node server.js"}}', encoding="utf-8")
+    (repo / "package.json").write_text(
+        '{"scripts":{"start":"next start"},"dependencies":{"next":"14.0.0"}}',
+        encoding="utf-8",
+    )
     selected = [repo]
     contents = {repo: "### Local Agent Context\n\n## Scope\n\n..."}
     summaries = {repo: "Root"}

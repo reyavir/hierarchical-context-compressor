@@ -86,11 +86,5 @@ def wrap_agents_md_header(dir_path: Path, repo_root: Path, body: str) -> str:
     """
     display = _display_name(repo_root, dir_path)
     folder_name = "Repository Root" if display == "." else dir_path.name
-    header = f"""### Local Agent Context: {folder_name}
-
-## Scope
-
-This agent is responsible for the logic within this directory and its subdirectories.
-
-"""
+    header = f"### Local Agent Context: {folder_name}\n\n"
     return header + body.strip() + "\n"

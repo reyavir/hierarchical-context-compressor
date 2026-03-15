@@ -55,34 +55,33 @@ MAX_TOTAL_CHARS_DISCOVERY = 40000
 
 def is_web_app(repo_root: Path) -> bool:
     """
-    Heuristic: treat repo as a web app if it has web-facing entrypoints or standard web layout.
-    Uses path listing only (no crawler).
+    Heuristic: treat repo as a web app only if it looks like a *user-facing* web app
+    (something you'd point an llms.txt crawler at), not a backend API alone.
+    - Requires evidence of a UI: templates/ static/ public/ or index.html, or a frontend stack in package.json.
+    - Backend-only repos (e.g. FastAPI/Flask API with no templates/static) do NOT get llms.txt.
     """
     repo_root = repo_root.resolve()
     try:
         names = {p.name.lower() for p in repo_root.iterdir()}
     except OSError:
         return False
-    if names & {"templates", "static", "public", "app", "src"}:
+    # Clear UI signals: server-rendered or static assets
+    if names & {"templates", "static", "public"}:
         return True
-    if names & {"index.html", "app.py", "main.py", "server.py", "app.js", "index.js"}:
-        if "package.json" in names or "requirements.txt" in names:
-            return True
+    # Single-page or static site at root
+    if "index.html" in names:
+        return True
+    # Frontend app: package.json with start/dev/serve AND a known frontend framework in deps
     if "package.json" in names:
         try:
             data = json.loads((repo_root / "package.json").read_text(encoding="utf-8", errors="replace"))
             scripts = data.get("scripts", {}) or {}
-            if any(k in scripts for k in ("start", "dev", "serve")):
-                return True
-        except Exception:
-            pass
-    for name in ("requirements.txt", "pyproject.toml"):
-        p = repo_root / name
-        if not p.exists():
-            continue
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace").lower()
-            if any(fw in text for fw in ("flask", "django", "fastapi", "starlette")):
+            if not any(k in scripts for k in ("start", "dev", "serve")):
+                return False
+            deps = {k.lower() for k in (data.get("dependencies") or {}).keys()}
+            deps |= {k.lower() for k in (data.get("devDependencies") or {}).keys()}
+            frontend = {"next", "react-scripts", "vite", "vue", "nuxt", "angular", "remix", "svelte", "parcel"}
+            if deps & frontend:
                 return True
         except Exception:
             pass
@@ -200,98 +199,16 @@ def run_phase2_discovery(
     )
 
 
-def _trim_and_tag_snippets(discovered_contents: Dict[str, str]) -> Dict[str, str]:
-    """
-    Trim known file types to the most relevant parts and tag them for the LLM.
-    Returns path -> content (possibly trimmed and with a role label in the key).
-    """
-    result: Dict[str, str] = {}
-    for path, content in discovered_contents.items():
-        path_lower = path.lower()
-        if path_lower == "package.json":
-            try:
-                data = json.loads(content.split("... (truncated)")[0])
-                scripts = data.get("scripts") or {}
-                if scripts:
-                    result["package.json (scripts)"] = json.dumps({"scripts": scripts}, indent=2)
-                else:
-                    result[path] = content[:2000]
-            except Exception:
-                result[path] = content[:4000]
-        elif path_lower == "pyproject.toml":
-            out: List[str] = []
-            in_project = in_tool = False
-            for line in content.splitlines():
-                if line.strip().startswith("[project]"):
-                    in_project = True
-                    in_tool = False
-                elif line.strip().startswith("[tool."):
-                    in_tool = True
-                    in_project = False
-                elif line.strip().startswith("[") and "]" in line:
-                    in_project = in_tool = False
-                if in_project or in_tool:
-                    out.append(line)
-            result["pyproject.toml (config)"] = "\n".join(out)[:3000] if out else content[:3000]
-        elif path_lower.endswith(("main.py", "app.py", "index.py", "index.js", "index.ts", "index.tsx")):
-            lines = content.splitlines()
-            if len(lines) > 80:
-                result[f"{path} (entrypoint, first 80 lines)"] = "\n".join(lines[:80]) + "\n... (truncated)"
-            else:
-                result[f"{path} (entrypoint)"] = content
-        else:
-            result[path] = content
-    return result
-
-
 def _build_user_message(dir_path: Path, repo_root: Path, tree_text: str, discovered_contents: Dict[str, str]) -> str:
     rel = dir_path.relative_to(repo_root).as_posix() if dir_path != repo_root else "."
     parts = [f"Directory: `{rel}`", "", "Recursive file tree:", "```", tree_text, "```", ""]
     if discovered_contents:
-        trimmed = _trim_and_tag_snippets(discovered_contents)
-        parts.append("File contents (use these to extract exact commands, paths, and symbols):")
-        keys = set(trimmed.keys())
-        if any("package.json" in k for k in keys):
-            parts.append("From package.json scripts, list only commands that CI or a dev would run (build, test, lint, dev, start).")
-        if any("pyproject.toml" in k for k in keys):
-            parts.append("From pyproject.toml, infer package name and test/lint tools if present.")
-        parts.append("")
-        for path, content in trimmed.items():
+        parts.append("Key file contents:")
+        for path, content in discovered_contents.items():
             parts.append(f"--- {path} ---")
             parts.append(content)
             parts.append("")
     return "\n".join(parts)
-
-
-# Phrases that make a bullet likely generic fluff if there's no code/path reference
-_GENERIC_PHRASES = re.compile(
-    r"\b(best practices|well structured|clean code|modern practices|good patterns|"
-    r"follows conventions|properly organized|maintainable|readable code)\b",
-    re.IGNORECASE,
-)
-
-
-def _drop_generic_bullets(md: str) -> str:
-    """
-    Remove list items that have no code/path reference (no backticks) and contain generic fluff.
-    Keeps bullets that mention at least one `path`, `symbol`, or `command`.
-    """
-    lines = md.split("\n")
-    out: List[str] = []
-    for line in lines:
-        stripped = line.strip()
-        is_bullet = stripped.startswith("- ") or stripped.startswith("* ")
-        if not is_bullet:
-            out.append(line)
-            continue
-        has_backtick = "`" in line
-        if has_backtick:
-            out.append(line)
-            continue
-        if _GENERIC_PHRASES.search(line):
-            continue
-        out.append(line)
-    return "\n".join(out)
 
 
 def _ensure_three_sections(md: str) -> str:
@@ -341,7 +258,6 @@ def generate_agents_md_with_llm(
         content = (resp.choices[0].message.content or "").strip()
         if not content:
             raise ValueError("Empty response")
-        content = _drop_generic_bullets(content)
         if not is_root:
             content = _ensure_three_sections(content)
         return wrap_agents_md_header(dir_path, repo_root, content)

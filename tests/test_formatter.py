@@ -42,6 +42,5 @@ def test_wrap_agents_md_header(tmp_path: Path) -> None:
     body = "## Setup & Commands\n\nDone."
     out = wrap_agents_md_header(sub, repo, body)
     assert "Local Agent Context" in out
-    assert "Scope" in out
     assert "Setup & Commands" in out
     assert "src" in out
