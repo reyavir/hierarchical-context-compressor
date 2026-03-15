@@ -33,18 +33,20 @@ Do not use vague phrases like "well organized" or "follows best practices" witho
 
 AGENTS_MD_SYSTEM_PROMPT = """You are writing an Operational Manual for an AI agent for **this directory**. Extract USEFUL, SPECIFIC information only. Every bullet must reference a concrete file path, command, or symbol (in backticks). No broad or vague statements.
 
-**## Setup & Commands**
-- List ONLY commands you can point to in real files (e.g. package.json scripts, Makefile, pyproject.toml). For each: give the **exact command** and **source** (e.g. `npm run test` from `package.json` scripts). If you find no runnable commands, say exactly: "No runnable commands detected in this directory." Do not guess or invent commands.
+You MAY use these level-2 headers when (and only when) you have concrete, evidence-backed content:
 
-**## Code Style & Patterns**
-- Mention ONLY patterns you can back with a concrete example: file name, function/class name, or config key. Include at least one concrete path or symbol per bullet (e.g. `src/api/user.py:get_user`, `tests/test_user.py`). Do not write vague lines like "follows good patterns" or "uses modern practices" unless you add a specific file or symbol right after.
+## Setup & Commands
+- List ONLY commands you can point to in real files (e.g. package.json scripts, Makefile, pyproject.toml). For each: give the **exact command** and **source** (e.g. `npm run test` from `package.json` scripts). If you find no runnable commands, omit this section entirely. Do not guess or invent commands.
 
-**## Implementation Details**
-- Name **specific entrypoints and modules** (e.g. `main.py`, `app.py`, `src/index.tsx`) and state which file to open first for a given kind of change. Focus on how code is wired: imports, module boundaries, layers. Do not restate the README.
+## Code Style & Patterns
+- Mention ONLY patterns you can back with a concrete example: file name, function/class name, or config key. Include at least one concrete path or symbol per bullet (e.g. `src/api/user.py:get_user`, `tests/test_user.py`). If you do not see any clear style signals, omit this section.
+
+## Implementation Details
+- Name **specific entrypoints and modules** (e.g. `main.py`, `app.py`, `src/index.tsx`) and state which file to open first for a given kind of change. Focus on how code is wired: imports, module boundaries, layers. Do not restate the README. If there is nothing interesting beyond what the tree already shows, omit this section.
 
 **Banned:** Do not use generic phrases ("well structured", "best practices", "clean code") without immediately following with a concrete example (file path or symbol in backticks). If a bullet has no code/path reference, omit it.
 
-Output exactly the three level-2 headers above. Be concise; bullets over paragraphs."""
+Use at most the three headers above. If you have no strong signal for a section, leave it out entirely. Be concise; bullets over paragraphs."""
 
 # Caps
 MAX_DIRS_PHASE1 = 15
@@ -211,16 +213,75 @@ def _build_user_message(dir_path: Path, repo_root: Path, tree_text: str, discove
     return "\n".join(parts)
 
 
-def _ensure_three_sections(md: str) -> str:
-    required = ["## Setup & Commands", "## Code Style & Patterns", "## Implementation Details"]
-    seen = [h in md for h in required]
-    if all(seen):
+_GENERIC_PHRASES = re.compile(
+    r"\b(best practices|well structured|clean code|modern practices|good patterns|"
+    r"follows conventions|properly organized|maintainable|readable code)\b",
+    re.IGNORECASE,
+)
+
+
+def _drop_generic_bullets(md: str) -> str:
+    """
+    Remove list items that have no code/path reference (no backticks) and contain generic fluff.
+    Keeps bullets that mention at least one `path`, `symbol`, or `command`.
+    """
+    lines = md.split("\n")
+    out: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        is_bullet = stripped.startswith("- ") or stripped.startswith("* ")
+        if not is_bullet:
+            out.append(line)
+            continue
+        has_backtick = "`" in line
+        if has_backtick:
+            out.append(line)
+            continue
+        if _GENERIC_PHRASES.search(line):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _prune_sections(md: str) -> str:
+    """
+    Drop whole sections (## Heading ...) that don't provide a unique signal after
+    generic bullets are removed. A section is kept if it has either:
+    - at least one backticked reference, or
+    - at least 2 non-empty lines of content.
+    """
+    lines = md.split("\n")
+    n = len(lines)
+    # Find indices of level-2 headings
+    heading_idxs: List[int] = [i for i, line in enumerate(lines) if line.startswith("## ")]
+    if not heading_idxs:
         return md
-    out = md.rstrip()
-    for i, h in enumerate(required):
-        if not seen[i]:
-            out += "\n\n" + h + "\n\n_No content generated for this section._"
-    return out
+
+    new_lines: List[str] = []
+    # Keep everything before the first heading as-is
+    first_idx = heading_idxs[0]
+    new_lines.extend(lines[:first_idx])
+
+    for idx, h_start in enumerate(heading_idxs):
+        h_end = heading_idxs[idx + 1] if idx + 1 < len(heading_idxs) else n
+        heading_line = lines[h_start]
+        body_lines = lines[h_start + 1 : h_end]
+        body_text = "\n".join(body_lines).strip()
+        if not body_text:
+            # Empty body: drop this section
+            continue
+        # Evaluate signal
+        has_backtick = "`" in body_text
+        nonempty = [l for l in body_lines if l.strip()]
+        has_substance = len(nonempty) >= 2
+        if not has_backtick and not has_substance:
+            # No concrete reference and basically nothing there: drop
+            continue
+        # Keep section
+        new_lines.append(heading_line)
+        new_lines.extend(body_lines)
+
+    return "\n".join(new_lines).rstrip()
 
 
 def generate_agents_md_with_llm(
@@ -258,8 +319,10 @@ def generate_agents_md_with_llm(
         content = (resp.choices[0].message.content or "").strip()
         if not content:
             raise ValueError("Empty response")
-        if not is_root:
-            content = _ensure_three_sections(content)
+        # First drop obviously generic bullets, then prune whole sections that
+        # don't carry any concrete signal.
+        content = _drop_generic_bullets(content)
+        content = _prune_sections(content)
         return wrap_agents_md_header(dir_path, repo_root, content)
     except Exception as exc:
         console.print(f"[yellow]Generation failed for {rel}: {exc}[/yellow]")

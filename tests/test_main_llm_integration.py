@@ -77,8 +77,6 @@ def test_generate_agents_md_with_llm_nested(tmp_path: Path) -> None:
         client, "gpt-4o", sub, repo, tree, contents, is_root=False
     )
     assert "## Setup & Commands" in out
-    assert "## Code Style & Patterns" in out
-    assert "## Implementation Details" in out
     assert "Local Agent Context" in out
 
 
