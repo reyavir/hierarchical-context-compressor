@@ -1,15 +1,18 @@
 # hierarchical-context-compressor
 
-CLI and GitHub Action to generate AI-optimized hierarchical context maps for any codebase. Produces a root **llms.txt** (Master Dispatcher) and per-directory **agents.md** (Local Agent Context) files so AI agents can navigate your repo like a sitemap.
+CLI and GitHub Action to generate AI-optimized hierarchical context maps for any codebase.
 
-Define structure once; get purpose, public API, and dependencies per folder — with optional LLM summaries when `OPENAI_API_KEY` is set.
+- **All repos**: root **agents.md** (table of contents) plus per-directory **AGENTS.md** operational manuals.
+- **Web apps only**: also **llms.txt** at the root (same index as agents.md).
+
+Generation uses a **three-phase** flow: (1) an LLM selects which directories get their own AGENTS.md from the full tree; (2) for each selected directory, discovery picks which files to read; (3) generation writes concise AGENTS.md content. Root agents.md is a **concise ToC + minimal overview** (guide, not encyclopedia); nested AGENTS.md are **concise** operational manuals (Setup & Commands, Code Style & Patterns, Implementation Details).
 
 ## Installation
 
 Requires **Python 3.10+** and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv tool install git+https://github.com/reyavir/hierarchical-context-compressor.git
+uv tool install git+https://github.com/YOUR_ORG/hierarchical-context-compressor.git
 ```
 
 This installs the **`hcc`** command globally.
@@ -22,15 +25,16 @@ uv tool uninstall hierarchical-context-compressor
 
 ## Development
 
-To work on the tool itself, clone the repo and sync dependencies:
+Clone the repo and install in editable mode:
 
 ```bash
-git clone https://github.com/reyavir/hierarchical-context-compressor.git
+git clone https://github.com/YOUR_ORG/hierarchical-context-compressor.git
 cd hierarchical-context-compressor
 uv sync
+# or: pip install -e .
 ```
 
-Run the CLI from the repo:
+Run the CLI:
 
 ```bash
 uv run hcc --root /path/to/some/repo
@@ -44,26 +48,52 @@ Run tests:
 uv run pytest
 ```
 
-## Quick Start
+## CLI options
 
-1. **Generate context for a repo** (writes `llms.txt` and `agents.md` into the target repo):
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--root` | `.` | Repository root to analyze. |
+| `--discovery-model` | `gpt-4o-mini` | Model for directory selection and file discovery. |
+| `--generation-model` | `gpt-4o` | Model for AGENTS.md generation. |
+| `--model` | — | Use this model for both discovery and generation (overrides the two above). |
+| `--base-url` | — | Custom API base URL (e.g. LiteLLM proxy). |
+| `--dry-run` | `false` | Do not write files; print a tree view. |
+
+**Environment**
+
+- `OPENAI_API_KEY` – required for LLM generation.
+- `OPENAI_BASE_URL` – optional; used when `--base-url` is not set (e.g. `OPENAI_BASE_URL=http://localhost:4000` for a proxy).
+
+Example with a proxy:
+
+```bash
+hcc --base-url http://localhost:4000 --root /path/to/repo
+# or
+OPENAI_BASE_URL=http://localhost:4000 hcc --root /path/to/repo
+```
+
+## Quick start
+
+1. **Generate context** (writes root **agents.md** and per-directory **AGENTS.md**; web apps also get **llms.txt**):
 
    ```bash
    hcc --root /path/to/your/repo
    ```
 
-2. **Preview without writing files** (dry run with a tree and summaries):
+2. **Preview without writing** (dry run):
 
    ```bash
    hcc --root /path/to/your/repo --dry-run
    ```
 
-3. **Optional: LLM summaries**  
-   Set `OPENAI_API_KEY` in your environment, or when developing from a clone add a `.env` file in the project root (see `.gitignore`; never commit it).
+3. **Optional: LLM generation**  
+   Set `OPENAI_API_KEY` in your environment, or add a `.env` file in the project root (see `.gitignore`; never commit it).
 
 ## Traditional pip
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 python -m src.main --root /path/to/your/repo
 ```
+
+Replace `YOUR_ORG` in the git URLs with your GitHub org or username once the repo is pushed.

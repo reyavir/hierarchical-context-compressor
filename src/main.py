@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import re
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Sequence
+from typing import Dict, List, Optional
 
 import click
 from dotenv import load_dotenv
@@ -12,266 +12,326 @@ from openai import OpenAI
 from rich.console import Console
 from rich.tree import Tree
 
-from .analyzer import FolderAnalysis, analyze_folder
-from .crawler import FolderInfo, crawl_repository
-from .formatter import format_agents_md, format_root_llms
+from .formatter import format_root_agents_md, format_root_llms, wrap_agents_md_header
+from .tree import get_tree, read_files_by_paths
 
 
 console = Console()
 
+# --- Phase 1: Directory selection ---
+DIRECTORY_SELECTION_SYSTEM = """You are given the full recursive file tree of a repository. Output a list of directory paths (one per line, relative to repo root) that should have their own AGENTS.md—e.g. substantial subprojects, docs, app source, scripts. Root must be included (use "." or empty for root). Output only paths, one per line, no explanation. Directories only, no files."""
 
-SYSTEM_PROMPT = (
-    "You are a technical documentarian. Summarize this folder's purpose in 2 sentences. "
-    "Focus on 'What it does' and 'How it relates to the rest of the app'. "
-    "Do not use fluff. Output in Markdown format."
-)
+# --- Phase 2: Discovery (which files to read per dir) ---
+DISCOVERY_SYSTEM = """You are given the recursive file tree of one directory. Output a list of file paths (one per line, relative to this directory) that are essential to understand setup, commands, code style, and entry points (e.g. README, config, main source). Output only paths, one per line, no explanation."""
 
-PUBLIC_API_INSTRUCTIONS = (
-    "Also identify the folder's Public API: names of functions/classes that other folders should call/use. "
-    "List names only, as Markdown bullets using backticks.\n\n"
-    "Output format:\n"
-    "## Purpose\n"
-    "<2 sentences>\n\n"
-    "## Public API\n"
-    "- `Name`\n"
-)
+# --- Phase 3: Generation ---
+ROOT_AGENTS_MD_SYSTEM_PROMPT = """You are writing the **root** repository index (agents.md). Output a **table of contents** with links to each nested AGENTS.md (e.g. [docs/AGENTS.md](./docs/AGENTS.md), [src/AGENTS.md](./src/AGENTS.md)), plus one or two **short** paragraphs describing what this codebase is and how it is structured. Be concise—a guide, not an encyclopedia. Use markdown links and bullets. Do not invent content; base everything on the provided tree and file contents."""
+
+AGENTS_MD_SYSTEM_PROMPT = """You are writing an Operational Manual for an AI agent for **this directory**. Be concise: short, scannable sections; bullets and short blocks; no long prose. Output exactly these three level-2 headers:
+
+## Setup & Commands
+- Runnable setup and commands (e.g. from package.json scripts, Makefile, npm/pip/uv). Exact commands the agent can run. If none, state "No scripts or makefiles detected."
+
+## Code Style & Patterns
+- Functional vs OOP; libraries/frameworks; naming conventions. Be concrete.
+
+## Implementation Details
+- Critical dependencies; entry points and key modules. So the agent knows where to make changes.
+
+Do not invent content. Base every statement on the provided file tree and file contents."""
+
+# Caps
+MAX_DIRS_PHASE1 = 15
+MAX_PATHS_DISCOVERY = 20
+MAX_CHARS_PER_FILE = 8000
+MAX_TOTAL_CHARS_DISCOVERY = 40000
 
 
-@dataclass(frozen=True)
-class FolderLLMInfo:
-    purpose_md: str
-    public_api: Sequence[str]
+def is_web_app(repo_root: Path) -> bool:
+    """
+    Heuristic: treat repo as a web app if it has web-facing entrypoints or standard web layout.
+    Uses path listing only (no crawler).
+    """
+    repo_root = repo_root.resolve()
+    try:
+        names = {p.name.lower() for p in repo_root.iterdir()}
+    except OSError:
+        return False
+    if names & {"templates", "static", "public", "app", "src"}:
+        return True
+    if names & {"index.html", "app.py", "main.py", "server.py", "app.js", "index.js"}:
+        if "package.json" in names or "requirements.txt" in names:
+            return True
+    if "package.json" in names:
+        try:
+            data = json.loads((repo_root / "package.json").read_text(encoding="utf-8", errors="replace"))
+            scripts = data.get("scripts", {}) or {}
+            if any(k in scripts for k in ("start", "dev", "serve")):
+                return True
+        except Exception:
+            pass
+    for name in ("requirements.txt", "pyproject.toml"):
+        p = repo_root / name
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace").lower()
+            if any(fw in text for fw in ("flask", "django", "fastapi", "starlette")):
+                return True
+        except Exception:
+            pass
+    return False
 
 
-def _get_openai_client() -> Optional[OpenAI]:
-    # Load .env from project root (two levels up from this file: src/ -> project/)
+def _get_openai_client(base_url: Optional[str] = None) -> Optional[OpenAI]:
     project_root = Path(__file__).resolve().parents[1]
     env_path = project_root / ".env"
     if env_path.exists():
         load_dotenv(env_path, override=False)
-
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
-    # The OpenAI client auto-reads the API key from env.
-    return OpenAI()
+    if base_url:
+        return OpenAI(api_key=api_key, base_url=base_url)
+    return OpenAI(api_key=api_key)
 
 
-def summarize_folder_with_llm(
-    client: Optional[OpenAI],
-    model: str,
-    analysis: FolderAnalysis,
-) -> FolderLLMInfo:
-    """
-    Use a small LLM call to summarize a folder's purpose based on file names
-    and the head of the main file.
-    Falls back to a heuristic summary if no client is available.
-    """
-    folder = analysis.folder
-    rel = folder.rel_path.as_posix()
+def _parse_directory_selection(completion: str, repo_root: Path) -> List[Path]:
+    """Parse phase 1 response into list of Path; root always included; only existing dirs."""
+    seen: set[str] = set()
+    result: List[Path] = []
+    for line in completion.strip().splitlines():
+        rel = line.strip().strip("/").strip() or "."
+        if rel in seen:
+            continue
+        if rel == "." or rel == "":
+            result.insert(0, repo_root)
+            seen.add(".")
+            continue
+        path = (repo_root / rel).resolve()
+        try:
+            path.relative_to(repo_root)
+        except ValueError:
+            continue
+        if path.is_dir() and path not in result:
+            result.append(path)
+            seen.add(rel)
+    if repo_root not in result:
+        result.insert(0, repo_root)
+    return result[:MAX_DIRS_PHASE1]
 
-    file_list = "\n".join(f"- {p.name}" for p in folder.files)
-    snippet = analysis.main_file_head or ""
 
-    user_content = f"""Folder: `{rel}`
+def _parse_discovery_paths(completion: str, dir_path: Path) -> List[str]:
+    """Parse phase 2 response into list of relative file paths that exist under dir_path."""
+    result: List[str] = []
+    for line in completion.strip().splitlines():
+        rel = line.strip().lstrip("/").strip()
+        if not rel:
+            continue
+        path = (dir_path / rel).resolve()
+        try:
+            path.relative_to(dir_path)
+        except ValueError:
+            continue
+        if path.is_file():
+            result.append(rel)
+    return result[:MAX_PATHS_DISCOVERY]
 
-Files:
-{file_list or '(no files)'}
 
-Main file snippet:
-```
-{snippet}
-```"""
-
-    if client is None:
-        # Heuristic fallback: derive a more concrete description from static analysis.
-        purpose = _heuristic_purpose(analysis)
-        return FolderLLMInfo(purpose_md=purpose, public_api=list(analysis.key_exports))
-
+def run_phase1_directory_selection(
+    client: OpenAI,
+    discovery_model: str,
+    repo_root: Path,
+) -> List[Path]:
+    """Phase 1: one LLM call with full tree -> list of dirs that get AGENTS.md."""
+    tree_text = get_tree(repo_root)
     try:
         resp = client.chat.completions.create(
-            model=model,
+            model=discovery_model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + PUBLIC_API_INSTRUCTIONS},
+                {"role": "system", "content": DIRECTORY_SELECTION_SYSTEM},
+                {"role": "user", "content": f"Repository tree:\n\n```\n{tree_text}\n```"},
+            ],
+            max_tokens=1024,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        if content:
+            return _parse_directory_selection(content, repo_root)
+    except Exception as e:
+        console.print(f"[yellow]Phase 1 (directory selection) failed: {e}[/yellow]")
+    return [repo_root]
+
+
+def run_phase2_discovery(
+    client: OpenAI,
+    discovery_model: str,
+    dir_path: Path,
+) -> Dict[str, str]:
+    """Phase 2: discovery call for this dir -> file paths -> read_files_by_paths. Minimal fallback: README.md if present."""
+    tree_text = get_tree(dir_path)
+    paths: List[str] = []
+    try:
+        resp = client.chat.completions.create(
+            model=discovery_model,
+            messages=[
+                {"role": "system", "content": DISCOVERY_SYSTEM},
+                {"role": "user", "content": f"Directory tree:\n\n```\n{tree_text}\n```"},
+            ],
+            max_tokens=1024,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        if content:
+            paths = _parse_discovery_paths(content, dir_path)
+    except Exception as e:
+        console.print(f"[yellow]Discovery failed for {dir_path}: {e}[/yellow]")
+    if not paths and (dir_path / "README.md").is_file():
+        paths = ["README.md"]
+    return read_files_by_paths(
+        dir_path,
+        paths,
+        max_chars_per_file=MAX_CHARS_PER_FILE,
+        max_total_chars=MAX_TOTAL_CHARS_DISCOVERY,
+    )
+
+
+def _build_user_message(dir_path: Path, repo_root: Path, tree_text: str, discovered_contents: Dict[str, str]) -> str:
+    rel = dir_path.relative_to(repo_root).as_posix() if dir_path != repo_root else "."
+    parts = [f"Directory: `{rel}`", "", "Recursive file tree:", "```", tree_text, "```", ""]
+    if discovered_contents:
+        parts.append("Key file contents:")
+        for path, content in discovered_contents.items():
+            parts.append(f"--- {path} ---")
+            parts.append(content)
+            parts.append("")
+    return "\n".join(parts)
+
+
+def _ensure_three_sections(md: str) -> str:
+    required = ["## Setup & Commands", "## Code Style & Patterns", "## Implementation Details"]
+    seen = [h in md for h in required]
+    if all(seen):
+        return md
+    out = md.rstrip()
+    for i, h in enumerate(required):
+        if not seen[i]:
+            out += "\n\n" + h + "\n\n_No content generated for this section._"
+    return out
+
+
+def generate_agents_md_with_llm(
+    client: Optional[OpenAI],
+    generation_model: str,
+    dir_path: Path,
+    repo_root: Path,
+    tree_text: str,
+    discovered_contents: Dict[str, str],
+    is_root: bool,
+) -> str:
+    """
+    Generate AGENTS.md content for one directory. Root uses ToC prompt; nested uses three-section prompt.
+    Returns full document including header (wrap_agents_md_header applied).
+    """
+    rel = dir_path.relative_to(repo_root).as_posix() if dir_path != repo_root else "."
+
+    if client is None:
+        body = "## Table of contents\n\n_No LLM available._\n\n## Setup & Commands\n\n_No content._\n\n## Code Style & Patterns\n\n_No content._\n\n## Implementation Details\n\n_No content._"
+        if not is_root:
+            body = "## Setup & Commands\n\nNo scripts or makefiles detected.\n\n## Code Style & Patterns\n\n_Infer from file tree._\n\n## Implementation Details\n\n_No content._"
+        return wrap_agents_md_header(dir_path, repo_root, body)
+
+    user_content = _build_user_message(dir_path, repo_root, tree_text, discovered_contents)
+    system_prompt = ROOT_AGENTS_MD_SYSTEM_PROMPT if is_root else AGENTS_MD_SYSTEM_PROMPT
+    try:
+        resp = client.chat.completions.create(
+            model=generation_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=160,
+            max_tokens=4096,
         )
-        content = resp.choices[0].message.content or ""
-        purpose, public_api = _parse_llm_folder_output(content.strip())
-        if not public_api:
-            public_api = list(analysis.key_exports)
-        if not purpose:
-            purpose = content.strip()
-        return FolderLLMInfo(purpose_md=purpose, public_api=public_api)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[yellow]LLM summarization failed for {rel}: {exc}[/yellow]")
-        purpose = _heuristic_purpose(analysis)
-        return FolderLLMInfo(purpose_md=purpose, public_api=list(analysis.key_exports))
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            raise ValueError("Empty response")
+        if not is_root:
+            content = _ensure_three_sections(content)
+        return wrap_agents_md_header(dir_path, repo_root, content)
+    except Exception as exc:
+        console.print(f"[yellow]Generation failed for {rel}: {exc}[/yellow]")
+        body = "## Setup & Commands\n\n_Generation failed._\n\n## Code Style & Patterns\n\n_No content._\n\n## Implementation Details\n\n_No content._"
+        if is_root:
+            body = "## Table of contents\n\n_Generation failed._"
+        return wrap_agents_md_header(dir_path, repo_root, body)
 
 
-def _parse_llm_folder_output(md: str) -> tuple[str, list[str]]:
-    purpose = ""
-    purpose_match = re.search(
-        r"^##\s+Purpose\s*\n([\s\S]*?)(?:\n##\s+|\Z)", md, re.MULTILINE
-    )
-    if purpose_match:
-        purpose = purpose_match.group(1).strip()
-
-    api: list[str] = []
-    api_match = re.search(
-        r"^##\s+Public API\s*\n([\s\S]*?)(?:\n##\s+|\Z)", md, re.MULTILINE
-    )
-    if api_match:
-        api_block = api_match.group(1)
-        for line in api_block.splitlines():
-            m = re.search(r"`([^`]+)`", line)
-            if m:
-                api.append(m.group(1).strip())
-
-    seen = set()
-    uniq: list[str] = []
-    for name in api:
-        if name and name not in seen:
-            seen.add(name)
-            uniq.append(name)
-    return purpose, uniq
-
-
-def _heuristic_purpose(analysis: FolderAnalysis) -> str:
+def build_agents_md_contents(
+    repo_root: Path,
+    selected_dirs: List[Path],
+    client: Optional[OpenAI],
+    discovery_model: str,
+    generation_model: str,
+) -> tuple[Dict[Path, str], Dict[Path, str]]:
     """
-    Token-efficient but more informative fallback description when no LLM is available.
+    Run phase 2 and 3 for each selected dir. Returns (agents_md_contents, folder_summaries).
+    folder_summaries: one-line summary per dir for root ToC (we use first line of generated content or placeholder).
     """
-    folder = analysis.folder
-    rel = folder.rel_path.as_posix() or "."
-
-    exports = analysis.key_exports
-    deps = sorted(analysis.dependencies)
-    subdirs = [sub.path.name for sub in folder.subfolders]
-
-    parts = []
-
-    if rel == ".":
-        parts.append("This repository root contains the main application entrypoint and core modules.")
-    else:
-        parts.append(f"This folder `{rel}` contains logic focused on a specific feature or layer of the app.")
-
-    if exports:
-        shown = ", ".join(f"`{name}`" for name in exports[:6])
-        if len(exports) > 6:
-            shown += ", ..."
-        parts.append(f"It exposes a public surface via symbols such as {shown}.")
-
-    if deps:
-        shown = ", ".join(f"`{name}`" for name in deps[:6])
-        parts.append(f"It depends on external modules like {shown}.")
-
-    if subdirs:
-        subs = ", ".join(f"`{name}`" for name in subdirs[:4])
-        parts.append(f"It is organized into subdirectories {subs} for more focused responsibilities.")
-
-    if len(parts) == 1:
-        # Ensure at least two sentences per original instruction.
-        parts.append("It participates in the overall application by collaborating with neighboring folders and modules.")
-
-    return " ".join(parts)
+    contents: Dict[Path, str] = {}
+    summaries: Dict[Path, str] = {}
+    for dir_path in selected_dirs:
+        is_root = dir_path.resolve() == repo_root.resolve()
+        discovered = run_phase2_discovery(client, discovery_model, dir_path)
+        tree_text = get_tree(dir_path)
+        content = generate_agents_md_with_llm(
+            client,
+            generation_model,
+            dir_path,
+            repo_root,
+            tree_text,
+            discovered,
+            is_root=is_root,
+        )
+        contents[dir_path] = content
+        first_line = content.split("\n")[2] if "\n" in content else content[:80]
+        summaries[dir_path] = first_line.replace("#", "").strip()[:120]
+    return contents, summaries
 
 
-def build_analyses(root_folder: FolderInfo) -> Dict[Path, FolderAnalysis]:
-    analyses: Dict[Path, FolderAnalysis] = {}
-
-    def walk(folder: FolderInfo) -> None:
-        analyses[folder.path] = analyze_folder(folder)
-        for sub in folder.subfolders:
-            walk(sub)
-
-    walk(root_folder)
-    return analyses
-
-
-def build_summaries(
-    analyses: Dict[Path, FolderAnalysis],
-    model: str,
-) -> Dict[Path, FolderLLMInfo]:
-    client = _get_openai_client()
-    summaries: Dict[Path, FolderLLMInfo] = {}
-
-    for path, analysis in analyses.items():
-        # We always summarize high-signal folders, and the root folder.
-        if not analysis.is_high_signal and analysis.folder.rel_path != Path("."):
-            continue
-        summaries[path] = summarize_folder_with_llm(client, model, analysis)
-
-    return summaries
-
-
-def render_tree(
-    root: FolderInfo,
-    analyses: Dict[Path, FolderAnalysis],
-    summaries: Dict[Path, FolderLLMInfo],
-) -> None:
-    """
-    Render a rich tree view for dry-run mode.
-    """
-    def node_for(folder: FolderInfo) -> Tree:
-        analysis = analyses[folder.path]
-        label = folder.rel_path.as_posix() or "."
-        meta = []
-        if analysis.is_high_signal:
-            meta.append("high-signal")
-        if folder.has_readme:
-            meta.append("readme")
-        meta_str = f" [{' ,'.join(meta)}]" if meta else ""
-        title = f"[bold]{label}[/bold]{meta_str}"
-        tree = Tree(title)
-
-        # Files
-        for f in sorted(folder.files, key=lambda p: p.name.lower()):
-            tree.add(f"[cyan]{f.name}[/cyan]")
-
-        # Children
-        for sub in folder.subfolders:
-            tree.add(node_for(sub))
-        return tree
-
-    root_tree = node_for(root)
-    console.print(root_tree)
-
+def render_tree(repo_root: Path, selected_dirs: List[Path], agents_md_contents: Dict[Path, str]) -> None:
+    """Rich tree view for dry-run."""
+    tree = Tree("[bold]Repository[/bold]")
+    for dir_path in selected_dirs:
+        rel = dir_path.relative_to(repo_root).as_posix() if dir_path != repo_root else "."
+        label = f"[bold]{rel}[/bold]" + (" [AGENTS.md]" if dir_path in agents_md_contents else "")
+        tree.add(label)
+    console.print(tree)
     console.print()
-    console.print("[bold magenta]Summaries[/bold magenta]")
-    for path, info in summaries.items():
-        rel = analyses[path].folder.rel_path.as_posix() or "."
-        console.print(f"[bold]{rel}[/bold]: {info.purpose_md}")
-        if info.public_api:
-            console.print("[dim]Public API:[/dim] " + ", ".join(info.public_api))
-        console.print()
+    console.print("[bold magenta]AGENTS.md generated for[/bold magenta]")
+    for path in agents_md_contents:
+        rel = path.relative_to(repo_root).as_posix() if path != repo_root else "."
+        console.print(f"  [bold]{rel}[/bold] -> AGENTS.md")
 
 
 def write_context_files(
     repo_root: Path,
-    root_folder: FolderInfo,
-    analyses: Dict[Path, FolderAnalysis],
-    summaries: Dict[Path, FolderLLMInfo],
+    selected_dirs: List[Path],
+    agents_md_contents: Dict[Path, str],
+    folder_summaries: Dict[Path, str],
 ) -> None:
-    llms_path = repo_root / "llms.txt"
-    llms_path.write_text(
-        format_root_llms(
-            root_folder,
-            analyses,
-            {k: v.purpose_md for k, v in summaries.items()},
-        ),
+    agents_toc_path = repo_root / "agents.md"
+    agents_toc_path.write_text(
+        format_root_agents_md(repo_root, selected_dirs, folder_summaries),
         encoding="utf-8",
     )
-
-    # Per high-signal folder agents.md files + always root agents.md
-    for path, analysis in analyses.items():
-        if not (analysis.is_high_signal or analysis.folder.rel_path == Path(".")):
+    if is_web_app(repo_root):
+        llms_path = repo_root / "llms.txt"
+        llms_path.write_text(
+            format_root_llms(repo_root, selected_dirs, folder_summaries),
+            encoding="utf-8",
+        )
+    for dir_path, content in agents_md_contents.items():
+        if dir_path.resolve() == repo_root.resolve():
             continue
-        info = summaries.get(path)
-        purpose = info.purpose_md if info else None
-        public_api = info.public_api if info else None
-        content = format_agents_md(analysis, purpose, public_api=public_api)
-        agents_path = path / "agents.md"
+        agents_path = dir_path / "AGENTS.md"
         agents_path.write_text(
             _merge_with_existing_agents_md(agents_path, content),
             encoding="utf-8",
@@ -281,19 +341,15 @@ def write_context_files(
 def _merge_with_existing_agents_md(path: Path, regenerated: str) -> str:
     if not path.exists():
         return regenerated
-
     try:
         existing = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return regenerated
-
     m = re.search(r"^(#{2,3})\s+Rules\s*$", existing, re.MULTILINE)
     if not m:
         return regenerated
-
     rules_block = existing[m.start() :].rstrip()
-    base = regenerated.rstrip()
-    return base + "\n\n" + rules_block + "\n"
+    return regenerated.rstrip() + "\n\n" + rules_block + "\n"
 
 
 @click.command()
@@ -305,38 +361,70 @@ def _merge_with_existing_agents_md(path: Path, regenerated: str) -> str:
     help="Root directory of the repository to analyze.",
 )
 @click.option(
-    "--model",
+    "--discovery-model",
     type=str,
     default="gpt-4o-mini",
     show_default=True,
-    help="OpenAI model to use for folder summarization.",
+    help="OpenAI model for directory selection and file discovery (default gpt-4o-mini).",
+)
+@click.option(
+    "--generation-model",
+    type=str,
+    default="gpt-4o",
+    show_default=True,
+    help="OpenAI model for AGENTS.md generation (default gpt-4o).",
+)
+@click.option(
+    "--model",
+    type=str,
+    default=None,
+    help="Use this model for both discovery and generation (overrides --discovery-model and --generation-model).",
+)
+@click.option(
+    "--base-url",
+    type=str,
+    default=None,
+    help="Custom API base URL (e.g. LiteLLM proxy). Or set OPENAI_BASE_URL.",
 )
 @click.option(
     "--dry-run",
     is_flag=True,
     default=False,
-    help="Do not write files; instead print a rich tree view of the computed context.",
+    help="Do not write files; print a tree view of the computed context.",
 )
-def cli(root_dir: Path, model: str, dry_run: bool) -> None:
-    """
-    Generate a hierarchical context map for a codebase.
-    """
+def cli(
+    root_dir: Path,
+    discovery_model: str,
+    generation_model: str,
+    model: Optional[str],
+    base_url: Optional[str],
+    dry_run: bool,
+) -> None:
+    """Generate a hierarchical context map for a codebase (agents.md + AGENTS.md)."""
+    if model:
+        discovery_model = generation_model = model
+    base_url = base_url or os.getenv("OPENAI_BASE_URL")
     repo_root = root_dir.resolve()
     console.print(f"[bold]Scanning repository:[/bold] {repo_root}")
 
-    root_folder = crawl_repository(repo_root)
-    analyses = build_analyses(root_folder)
-    summaries = build_summaries(analyses, model=model)
+    client = _get_openai_client(base_url)
+    selected_dirs = run_phase1_directory_selection(client, discovery_model, repo_root)
+    if not client:
+        selected_dirs = [repo_root]
+    console.print(f"[dim]Selected {len(selected_dirs)} directories for AGENTS.md[/dim]")
+
+    agents_md_contents, folder_summaries = build_agents_md_contents(
+        repo_root, selected_dirs, client, discovery_model, generation_model
+    )
 
     if dry_run:
-        console.print("[bold blue]Dry run mode - not writing any files.[/bold blue]")
-        render_tree(root_folder, analyses, summaries)
+        console.print("[bold blue]Dry run - not writing any files.[/bold blue]")
+        render_tree(repo_root, selected_dirs, agents_md_contents)
     else:
-        console.print("[bold green]Writing llms.txt and agents.md files...[/bold green]")
-        write_context_files(repo_root, root_folder, analyses, summaries)
+        console.print("[bold green]Writing agents.md and AGENTS.md files...[/bold green]")
+        write_context_files(repo_root, selected_dirs, agents_md_contents, folder_summaries)
         console.print("[bold green]Done.[/bold green]")
 
 
 if __name__ == "__main__":
     cli()
-

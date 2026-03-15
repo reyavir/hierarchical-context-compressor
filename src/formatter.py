@@ -1,132 +1,96 @@
+"""
+Format root agents.md and llms.txt from selected_dirs and repo_root.
+No FolderInfo/FolderAnalysis.
+"""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
-
-from .analyzer import FolderAnalysis
-from .crawler import FolderInfo
+from typing import Dict, List
 
 
-def _folder_display_name(folder: FolderInfo) -> str:
-    return "." if folder.rel_path == Path(".") else folder.rel_path.as_posix()
+def _display_name(repo_root: Path, dir_path: Path) -> str:
+    if dir_path.resolve() == repo_root.resolve():
+        return "."
+    try:
+        return dir_path.relative_to(repo_root).as_posix()
+    except ValueError:
+        return dir_path.as_posix()
 
 
-def format_root_llms(
-    root: FolderInfo,
-    analyses: Dict[Path, FolderAnalysis],
+def format_root_agents_md(
+    repo_root: Path,
+    selected_dirs: List[Path],
     folder_summaries: Dict[Path, str],
 ) -> str:
     """
-    Build the top-level llms.txt "sitemap" file.
+    Build the root agents.md table of contents. Links to AGENTS.md for each selected dir.
+    """
+    lines: List[str] = []
+    lines.append("# Repository index (agents.md)")
+    lines.append("")
+    lines.append(
+        "This file is the **table of contents** for this repository. Each link points to an **AGENTS.md** "
+        "for that directory. Use it to navigate to the right directory before running tasks or editing code."
+    )
+    lines.append("")
+    lines.append("## Table of contents")
+    lines.append("")
+    for dir_path in selected_dirs:
+        display = _display_name(repo_root, dir_path)
+        rel = dir_path.relative_to(repo_root).as_posix() if dir_path != repo_root else "."
+        link_path = f"./{rel}/AGENTS.md" if rel != "." else "./AGENTS.md"
+        context_link = f" ([AGENTS.md]({link_path}))"
+        summary = folder_summaries.get(dir_path, "").strip()
+        if summary:
+            lines.append(f"- **{display}**{context_link}: {summary}")
+        else:
+            lines.append(f"- **{display}**{context_link}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_root_llms(
+    repo_root: Path,
+    selected_dirs: List[Path],
+    folder_summaries: Dict[Path, str],
+) -> str:
+    """
+    Build the top-level llms.txt for web apps. Master index linking to AGENTS.md per directory.
     """
     lines: List[str] = []
     lines.append("# Master Dispatcher (llms.txt)")
     lines.append("")
     lines.append(
-        "This file is the top-level routing map for AI agents. Follow links to per-folder `agents.md` files "
-        "to get local responsibilities, public APIs, and dependencies."
+        "This file is the **web app** master index. Each link points to an **AGENTS.md** for that directory."
     )
     lines.append("")
-    lines.append("## Conventions")
-    lines.append("- **llms.txt**: master dispatcher for the repo.")
-    lines.append("- **agents.md**: local agent context for a directory (and its subdirectories).")
+    lines.append("## Table of contents")
     lines.append("")
-    lines.append("## Modules")
-    lines.append("")
-
-    def walk(folder: FolderInfo, indent: int = 0) -> None:
-        analysis = analyses.get(folder.path)
-        summary = folder_summaries.get(folder.path)
-        bullet = "  " * indent + "- "
-
-        display_name = _folder_display_name(folder)
-
-        context_link = ""
-        if analysis and (analysis.is_high_signal or folder.rel_path == Path(".")):
-            # Link to local agents.md; path is relative to repo root.
-            ctx_rel = folder.rel_path / "agents.md"
-            link_path = f"./{ctx_rel.as_posix()}" if ctx_rel.as_posix() != "agents.md" else "./agents.md"
-            context_link = f" ([agents]({link_path}))"
-
-        desc = summary.strip() if summary else ""
-        if desc:
-            lines.append(f"{bullet}**{display_name}**{context_link}: {desc}")
+    for dir_path in selected_dirs:
+        display = _display_name(repo_root, dir_path)
+        rel = dir_path.relative_to(repo_root).as_posix() if dir_path != repo_root else "."
+        link_path = f"./{rel}/AGENTS.md" if rel != "." else "./AGENTS.md"
+        context_link = f" ([AGENTS.md]({link_path}))"
+        summary = folder_summaries.get(dir_path, "").strip()
+        if summary:
+            lines.append(f"- **{display}**{context_link}: {summary}")
         else:
-            lines.append(f"{bullet}**{display_name}**{context_link}")
-
-        for sub in folder.subfolders:
-            walk(sub, indent + 1)
-
-    walk(root, indent=0)
+            lines.append(f"- **{display}**{context_link}")
     lines.append("")
     return "\n".join(lines)
 
 
-def format_agents_md(
-    analysis: FolderAnalysis,
-    folder_summary: Optional[str],
-    public_api: Optional[Sequence[str]] = None,
-) -> str:
+def wrap_agents_md_header(dir_path: Path, repo_root: Path, body: str) -> str:
     """
-    Build the contents of an `agents.md` for a single directory.
+    Prepend the standard Local Agent Context header and Scope to the LLM-generated AGENTS.md body.
     """
-    folder = analysis.folder
-    rel = _folder_display_name(folder)
-    folder_name = folder.path.name if rel != "." else "Repository Root"
+    display = _display_name(repo_root, dir_path)
+    folder_name = "Repository Root" if display == "." else dir_path.name
+    header = f"""### Local Agent Context: {folder_name}
 
-    lines: List[str] = []
-    lines.append(f"### Local Agent Context: {folder_name}")
-    lines.append("")
-    lines.append("## Scope")
-    lines.append("")
-    lines.append("This agent is responsible for the logic within this directory and its subdirectories.")
-    lines.append("")
+## Scope
 
-    lines.append("## System Context")
-    lines.append("")
+This agent is responsible for the logic within this directory and its subdirectories.
 
-    # Purpose
-    purpose = folder_summary.strip() if folder_summary else ""
-    if not purpose:
-        purpose = f"This folder `{rel}` contains source files used by the application."
-    lines.append("### Folder Purpose")
-    lines.append("")
-    lines.append(purpose)
-    lines.append("")
-
-    # Public API (LLM-identified preferred, fallback to static extraction)
-    lines.append("### Public API")
-    lines.append("")
-    api_list = list(public_api) if public_api else []
-    if not api_list:
-        api_list = list(analysis.key_exports)
-    if api_list:
-        for name in api_list:
-            lines.append(f"- `{name}`")
-    else:
-        lines.append("_No public API symbols were detected._")
-    lines.append("")
-
-    # Dependencies
-    lines.append("### Dependencies")
-    lines.append("")
-    if analysis.dependencies:
-        for dep in sorted(analysis.dependencies):
-            lines.append(f"- `{dep}`")
-    else:
-        lines.append("_No external dependencies detected beyond this folder._")
-    lines.append("")
-
-    # Files overview for extra structure, without raw code.
-    lines.append("### Files")
-    lines.append("")
-    if folder.files:
-        for f in sorted(folder.files, key=lambda p: p.name.lower()):
-            rel_file = f.relative_to(folder.path).as_posix()
-            lines.append(f"- `{rel_file}`")
-    else:
-        lines.append("_This folder currently has no files._")
-    lines.append("")
-
-    return "\n".join(lines)
-
+"""
+    return header + body.strip() + "\n"
