@@ -22,10 +22,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
+        run: pip install -e .
 
       - name: Generate hierarchical context
         env:
@@ -38,7 +35,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add llms.txt ":(glob)**/agents.md" || true
+          git add llms.txt agents.md ":(glob)**/AGENTS.md" || true
           if git diff --cached --quiet; then
             echo "No context changes to commit."
             exit 0
