@@ -25,20 +25,26 @@ DIRECTORY_SELECTION_SYSTEM = """You are given the full recursive file tree of a 
 DISCOVERY_SYSTEM = """You are given the recursive file tree of one directory. Output a list of file paths (one per line, relative to this directory) that are essential to understand setup, commands, code style, and entry points (e.g. README, config, main source). Output only paths, one per line, no explanation."""
 
 # --- Phase 3: Generation ---
-ROOT_AGENTS_MD_SYSTEM_PROMPT = """You are writing the **root** repository index (agents.md). Output a **table of contents** with links to each nested AGENTS.md (e.g. [docs/AGENTS.md](./docs/AGENTS.md), [src/AGENTS.md](./src/AGENTS.md)), plus one or two **short** paragraphs describing what this codebase is and how it is structured. Be concise—a guide, not an encyclopedia. Use markdown links and bullets. Do not invent content; base everything on the provided tree and file contents."""
+ROOT_AGENTS_MD_SYSTEM_PROMPT = """You are writing the **root** repository index (agents.md).
 
-AGENTS_MD_SYSTEM_PROMPT = """You are writing an Operational Manual for an AI agent for **this directory**. Be concise: short, scannable sections; bullets and short blocks; no long prose. Output exactly these three level-2 headers:
+**Structure:** (1) At most 2 short paragraphs describing what this codebase is and how it is structured—specific names, entrypoints, or paths only. (2) A table of contents: one bullet per directory with a link to its AGENTS.md and exactly one concrete phrase (e.g. "FastAPI API handlers (`app/api/*`)" or "Next.js frontend (`apps/web/`)"). Each bullet must include at least one path or filename in backticks. Total overview text (outside bullets) must be at most 5 sentences.
 
-## Setup & Commands
-- Runnable setup and commands (e.g. from package.json scripts, Makefile, npm/pip/uv). Exact commands the agent can run. If none, state "No scripts or makefiles detected."
+Do not use vague phrases like "well organized" or "follows best practices" without a concrete example. Base everything on the provided tree and file contents."""
 
-## Code Style & Patterns
-- Functional vs OOP; libraries/frameworks; naming conventions. Be concrete.
+AGENTS_MD_SYSTEM_PROMPT = """You are writing an Operational Manual for an AI agent for **this directory**. Extract USEFUL, SPECIFIC information only. Every bullet must reference a concrete file path, command, or symbol (in backticks). No broad or vague statements.
 
-## Implementation Details
-- Critical dependencies; entry points and key modules. So the agent knows where to make changes.
+**## Setup & Commands**
+- List ONLY commands you can point to in real files (e.g. package.json scripts, Makefile, pyproject.toml). For each: give the **exact command** and **source** (e.g. `npm run test` from `package.json` scripts). If you find no runnable commands, say exactly: "No runnable commands detected in this directory." Do not guess or invent commands.
 
-Do not invent content. Base every statement on the provided file tree and file contents."""
+**## Code Style & Patterns**
+- Mention ONLY patterns you can back with a concrete example: file name, function/class name, or config key. Include at least one concrete path or symbol per bullet (e.g. `src/api/user.py:get_user`, `tests/test_user.py`). Do not write vague lines like "follows good patterns" or "uses modern practices" unless you add a specific file or symbol right after.
+
+**## Implementation Details**
+- Name **specific entrypoints and modules** (e.g. `main.py`, `app.py`, `src/index.tsx`) and state which file to open first for a given kind of change. Focus on how code is wired: imports, module boundaries, layers. Do not restate the README.
+
+**Banned:** Do not use generic phrases ("well structured", "best practices", "clean code") without immediately following with a concrete example (file path or symbol in backticks). If a bullet has no code/path reference, omit it.
+
+Output exactly the three level-2 headers above. Be concise; bullets over paragraphs."""
 
 # Caps
 MAX_DIRS_PHASE1 = 15
@@ -194,16 +200,98 @@ def run_phase2_discovery(
     )
 
 
+def _trim_and_tag_snippets(discovered_contents: Dict[str, str]) -> Dict[str, str]:
+    """
+    Trim known file types to the most relevant parts and tag them for the LLM.
+    Returns path -> content (possibly trimmed and with a role label in the key).
+    """
+    result: Dict[str, str] = {}
+    for path, content in discovered_contents.items():
+        path_lower = path.lower()
+        if path_lower == "package.json":
+            try:
+                data = json.loads(content.split("... (truncated)")[0])
+                scripts = data.get("scripts") or {}
+                if scripts:
+                    result["package.json (scripts)"] = json.dumps({"scripts": scripts}, indent=2)
+                else:
+                    result[path] = content[:2000]
+            except Exception:
+                result[path] = content[:4000]
+        elif path_lower == "pyproject.toml":
+            out: List[str] = []
+            in_project = in_tool = False
+            for line in content.splitlines():
+                if line.strip().startswith("[project]"):
+                    in_project = True
+                    in_tool = False
+                elif line.strip().startswith("[tool."):
+                    in_tool = True
+                    in_project = False
+                elif line.strip().startswith("[") and "]" in line:
+                    in_project = in_tool = False
+                if in_project or in_tool:
+                    out.append(line)
+            result["pyproject.toml (config)"] = "\n".join(out)[:3000] if out else content[:3000]
+        elif path_lower.endswith(("main.py", "app.py", "index.py", "index.js", "index.ts", "index.tsx")):
+            lines = content.splitlines()
+            if len(lines) > 80:
+                result[f"{path} (entrypoint, first 80 lines)"] = "\n".join(lines[:80]) + "\n... (truncated)"
+            else:
+                result[f"{path} (entrypoint)"] = content
+        else:
+            result[path] = content
+    return result
+
+
 def _build_user_message(dir_path: Path, repo_root: Path, tree_text: str, discovered_contents: Dict[str, str]) -> str:
     rel = dir_path.relative_to(repo_root).as_posix() if dir_path != repo_root else "."
     parts = [f"Directory: `{rel}`", "", "Recursive file tree:", "```", tree_text, "```", ""]
     if discovered_contents:
-        parts.append("Key file contents:")
-        for path, content in discovered_contents.items():
+        trimmed = _trim_and_tag_snippets(discovered_contents)
+        parts.append("File contents (use these to extract exact commands, paths, and symbols):")
+        keys = set(trimmed.keys())
+        if any("package.json" in k for k in keys):
+            parts.append("From package.json scripts, list only commands that CI or a dev would run (build, test, lint, dev, start).")
+        if any("pyproject.toml" in k for k in keys):
+            parts.append("From pyproject.toml, infer package name and test/lint tools if present.")
+        parts.append("")
+        for path, content in trimmed.items():
             parts.append(f"--- {path} ---")
             parts.append(content)
             parts.append("")
     return "\n".join(parts)
+
+
+# Phrases that make a bullet likely generic fluff if there's no code/path reference
+_GENERIC_PHRASES = re.compile(
+    r"\b(best practices|well structured|clean code|modern practices|good patterns|"
+    r"follows conventions|properly organized|maintainable|readable code)\b",
+    re.IGNORECASE,
+)
+
+
+def _drop_generic_bullets(md: str) -> str:
+    """
+    Remove list items that have no code/path reference (no backticks) and contain generic fluff.
+    Keeps bullets that mention at least one `path`, `symbol`, or `command`.
+    """
+    lines = md.split("\n")
+    out: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        is_bullet = stripped.startswith("- ") or stripped.startswith("* ")
+        if not is_bullet:
+            out.append(line)
+            continue
+        has_backtick = "`" in line
+        if has_backtick:
+            out.append(line)
+            continue
+        if _GENERIC_PHRASES.search(line):
+            continue
+        out.append(line)
+    return "\n".join(out)
 
 
 def _ensure_three_sections(md: str) -> str:
@@ -253,6 +341,7 @@ def generate_agents_md_with_llm(
         content = (resp.choices[0].message.content or "").strip()
         if not content:
             raise ValueError("Empty response")
+        content = _drop_generic_bullets(content)
         if not is_root:
             content = _ensure_three_sections(content)
         return wrap_agents_md_header(dir_path, repo_root, content)
