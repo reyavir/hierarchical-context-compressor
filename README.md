@@ -12,10 +12,10 @@ Generation uses a **three-phase** flow: (1) an LLM selects which directories get
 Requires **Python 3.10+** and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv tool install git+https://github.com/YOUR_ORG/hierarchical-context-compressor.git
+uv tool install git+https://github.com/reyavir/hierarchical-context-compressor.git
 ```
 
-This installs the **`hcc`** command globally.
+This installs the **`hcc`** command lobally.
 
 To uninstall:
 
@@ -28,7 +28,7 @@ uv tool uninstall hierarchical-context-compressor
 Clone the repo and install in editable mode:
 
 ```bash
-git clone https://github.com/YOUR_ORG/hierarchical-context-compressor.git
+git clone https://github.com/reyavir/hierarchical-context-compressor.git
 cd hierarchical-context-compressor
 uv sync
 # or: pip install -e .
@@ -95,5 +95,3 @@ OPENAI_BASE_URL=http://localhost:4000 hcc --root /path/to/repo
 pip install -e .
 python -m src.main --root /path/to/your/repo
 ```
-
-Replace `YOUR_ORG` in the git URLs with your GitHub org or username once the repo is pushed.
