@@ -505,9 +505,30 @@ def build_agents_md_contents(
             templates_dir=templates_dir,
         )
         contents[dir_path] = content
-        first_line = content.split("\n")[2] if "\n" in content else content[:80]
-        summaries[dir_path] = first_line.replace("#", "").strip()[:120]
+        summaries[dir_path] = _extract_summary(content)
     return contents, summaries
+
+
+def _extract_summary(content: str, max_len: int = 120) -> str:
+    """
+    Extract a one-line summary for the ToC from generated AGENTS.md content.
+    Prefer the first substantive line (paragraph or bullet), not a ## section header.
+    """
+    lines = content.split("\n")
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("### Local Agent Context"):
+            continue
+        if s.startswith("## "):
+            continue
+        return s.replace("#", "").strip()[:max_len]
+    for line in lines:
+        s = line.strip()
+        if s:
+            return s.replace("#", "").strip()[:max_len]
+    return content.strip()[:max_len] if content else ""
 
 
 def render_tree(repo_root: Path, selected_dirs: List[Path], agents_md_contents: Dict[Path, str]) -> None:
@@ -544,8 +565,9 @@ def write_context_files(
         )
     for dir_path, content in agents_md_contents.items():
         if dir_path.resolve() == repo_root.resolve():
-            continue
-        agents_path = dir_path / "AGENTS.md"
+            agents_path = repo_root / "AGENTS.md"
+        else:
+            agents_path = dir_path / "AGENTS.md"
         agents_path.write_text(
             _merge_with_existing_agents_md(agents_path, content),
             encoding="utf-8",
