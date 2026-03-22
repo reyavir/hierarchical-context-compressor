@@ -24,12 +24,11 @@ jobs:
       - name: Install dependencies
         run: pip install -e .
 
+      # Repo root after checkout IS this project (no nested hierarchical-context-compressor folder).
       - name: Generate hierarchical context
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          cd hierarchical-context-compressor
-          python -m src.main --root ..
+        run: python -m src.main --root .
 
       - name: Commit and push context files
         run: |
