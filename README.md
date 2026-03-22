@@ -1,6 +1,6 @@
 # hierarchical-context-compressor
 
-CLI and GitHub Action to generate AI-optimized hierarchical context maps for any codebase.
+CLI tool to generate AI-optimized hierarchical context maps for any codebase. Run it locally, or **do the same thing in GitHub Actions** as this repo: a workflow that checks out your code, installs `hcc`, runs it on `--root .`, and optionally commits the generated files (no separate Marketplace “action” required).
 
 - **All repos**: root **agents.md** (table of contents) plus per-directory **AGENTS.md** operational manuals.
 - **Web apps only**: also **llms.txt** at the root (same index as agents.md).
@@ -15,7 +15,7 @@ Requires **Python 3.10+** and [uv](https://docs.astral.sh/uv/).
 uv tool install git+https://github.com/reyavir/hierarchical-context-compressor.git
 ```
 
-This installs the **`hcc`** command lobally.
+This installs the **`hcc`** command globally.
 
 To uninstall:
 
@@ -103,3 +103,12 @@ OPENAI_BASE_URL=http://localhost:4000 hcc --root /path/to/repo
 pip install -e .
 python -m src.main --root /path/to/your/repo
 ```
+
+## GitHub Actions (your repo)
+
+You can run `hcc` in CI the same way **this** project does: add a workflow under `.github/workflows/` that installs the tool, runs `hcc --root .` (or `python -m src.main --root .`), and—if you want—commits `agents.md`, nested `AGENTS.md`, and `llms.txt` when they change.
+
+- Add repo secret **`OPENAI_API_KEY`**.
+- If the workflow should **push** commits, set **Actions → Workflow permissions → Read and write** for the repository.
+
+**Reference:** [`.github/workflows/generate-context.yml`](.github/workflows/generate-context.yml) is what runs on pushes to `main` *here* (`pip install -e .` from the checkout). For **your** repo, the usual approach is `pip install "git+https://github.com/reyavir/hierarchical-context-compressor.git"` then `hcc --root .`—see **[`.github/workflows/hcc-template-for-other-repos.yml.example`](.github/workflows/hcc-template-for-other-repos.yml.example)** to copy and adapt.

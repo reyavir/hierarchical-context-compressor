@@ -34,7 +34,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add llms.txt agents.md ":(glob)**/AGENTS.md" || true
+          git add agents.md 2>/dev/null || true
+          [ -f llms.txt ] && git add llms.txt
+          git add ':(glob)**/AGENTS.md' 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No context changes to commit."
             exit 0
