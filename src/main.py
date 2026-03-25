@@ -25,93 +25,113 @@ DIRECTORY_SELECTION_SYSTEM = """You are given the full recursive file tree of a 
 DISCOVERY_SYSTEM = """You are given the recursive file tree of one directory. Output a list of file paths (one per line, relative to this directory) that are essential to understand setup, commands, code style, and entry points (e.g. README, config, main source). Output only paths, one per line, no explanation."""
 
 # --- Phase 3: Generation ---
-ROOT_AGENTS_MD_SYSTEM_PROMPT = """You are writing the **root** repository index (agents.md).
+ROOT_AGENTS_MD_SYSTEM_PROMPT = """You are writing the **root** repository index (agents.md) for an AI coding agent.
 
-**Structure:** (1) At most 2 short paragraphs describing what this codebase is and how it is structured—specific names, entrypoints, or paths only. (2) A table of contents: one bullet per directory with a link to its AGENTS.md and exactly one concrete phrase (e.g. "FastAPI API handlers (`app/api/*`)" or "Next.js frontend (`apps/web/`)"). Each bullet must include at least one path or filename in backticks. Total overview text (outside bullets) must be at most 5 sentences.
+**Purpose:** Route the agent to the correct folder before it edits code.
 
-Do not use vague phrases like "well organized" or "follows best practices" without a concrete example. Base everything on the provided tree and file contents."""
+**Required output:**
+1) 1-2 short imperative lines at the top that say:
+- Start here, then navigate to the closest directory AGENTS.md before coding.
+- Do not operate from root unless necessary.
+2) A table of contents with one bullet per selected directory. Each bullet must include:
+- link to that folder's `AGENTS.md`
+- exactly one concrete phrase with at least one backticked path/symbol.
 
-AGENTS_MD_SYSTEM_PROMPT = """You are writing an Operational Manual for an AI agent for **this directory**. Extract USEFUL, SPECIFIC information only. Every bullet must reference a concrete file path, command, or symbol (in backticks). No broad or vague statements.
+Keep overview text outside bullets to at most 5 short sentences—no wrap-up or "in conclusion" lines.
+No fenced code blocks (```). No sample code; the agent has the repo. Inline `paths` only.
+Do not use vague phrases like "well organized" or "best practices". Base everything on the provided tree and file contents."""
 
-You MAY use these level-2 headers when (and only when) you have concrete, evidence-backed content:
+AGENTS_MD_SYSTEM_PROMPT = """You are writing an Operational Manual for an AI coding agent for **this directory**.
+Tell the agent how to act in this folder—minimal text, maximum signal. Do not describe the codebase at length.
+
+Hard requirements:
+- Scope strictly to this directory; do not reference unrelated paths outside it unless the user message proves a necessary link.
+- Imperative only: "Do X in `path/file`" / "Run `command`".
+- Every bullet must include a concrete path, command, or symbol in backticks.
+- Prefer bullets over paragraphs. No long explanations, no repeated phrasing, no "for example" essays.
+- **Never** use fenced code blocks (```) or multi-line code samples. The agent can read the repo—do not paste `const`/`function` snippets. Inline `backticks` for files/symbols/commands only.
+- For each common task playbook (e.g. add route/service/test): at most **3-4 bullets total** for that task. Merge redundant steps (do not use separate "Create file / Define logic / Example" unless each line adds unique, cited detail).
+- **Banned closing fluff:** no summary paragraphs, no "By maintaining these guidelines…", "In summary…", or similar meta sign-off. End on the last factual bullet; stop.
+
+You MAY use these level-2 headers only when you have evidence-backed content:
 
 ## Setup & Commands
-- List ONLY commands you can point to in real files (e.g. package.json scripts, Makefile, pyproject.toml). For each: give the **exact command** and **source** (e.g. `npm run test` from `package.json` scripts). If you find no runnable commands, omit this section entirely. Do not guess or invent commands.
+- Exact runnable commands and source (e.g. `npm run test` from `package.json`). Scoped variants if real. Omit if none.
 
 ## Code Style & Patterns
-- Mention ONLY patterns you can back with a concrete example: file name, function/class name, or config key. Include at least one concrete path or symbol per bullet (e.g. `src/api/user.py:get_user`, `tests/test_user.py`). If you do not see any clear style signals, omit this section.
+- Must-follow rules for edits here, with backticked file/symbol proof. Omit if none.
 
 ## Implementation Details
-- Name **specific entrypoints and modules** (e.g. `main.py`, `app.py`, `src/index.tsx`) and state which file to open first for a given kind of change. Focus on how code is wired: imports, module boundaries, layers. Do not restate the README. If there is nothing interesting beyond what the tree already shows, omit this section.
+- Entry points and control files in **this** folder (routers, bootstrap, config) in one tight bullet list.
+- Short playbooks only: 3-4 bullets per task, each bullet one line, imperative. Omit if unsupported.
 
-**Banned:** Do not use generic phrases ("well structured", "best practices", "clean code") without immediately following with a concrete example (file path or symbol in backticks). If a bullet has no code/path reference, omit it.
-
-Use at most the three headers above. If you have no strong signal for a section, leave it out entirely. Be concise; bullets over paragraphs."""
+Use at most the three headers above. Leave out weak sections entirely."""
 
 # --- Directory type classification and type-specific prompts ---
-# Type -> (display name, persona name, persona description for header)
-DIRECTORY_TYPE_META: Dict[str, tuple[str, str, str]] = {
-    "core": ("Core", "Senior Lead Engineer", "Architectural rules, exported APIs, and strict logic boundaries."),
-    "docs": ("Docs", "Technical Writer", "Tone of voice, formatting rules (Markdown/Docusaurus), and link-checking commands."),
-    "tests": ("Tests", "QA Engineer", "Test coverage requirements, mock patterns, and how to run specific suites."),
-    "infra": ("Infra", "DevOps Specialist", "Environment variables, deployment safety, and CLI flag explanations."),
-    "generic": ("General", "Agent", "No specific role; extract setup, style, and implementation details from the tree and files."),
-}
-
 # Type -> full system prompt for generation (persona + boundary + what to extract)
 TYPE_SYSTEM_PROMPTS: Dict[str, str] = {
-    "core": """You are writing an Operational Manual for a **Senior Lead Engineer** in this directory (core/source code). Focus on: architectural rules, exported APIs, and strict logic boundaries. Extract USEFUL, SPECIFIC information only; every bullet must reference a concrete file path, command, or symbol (in backticks).
+    "core": """You are writing an Operational Manual for a **Senior Lead Engineer** in this directory (core/source code). Actionable edits only—dense bullets, no prose essays. Every bullet must include a concrete path, command, or symbol (in backticks).
 
-**Boundary:** This agent owns production code. Preserve exported APIs and architectural contracts; do not suggest breaking changes without calling out impact.
+**Boundary:** This agent owns production code. Preserve exported APIs and architectural contracts; call out breaking impact briefly if needed—one line, backticked.
 
-You MAY use these level-2 headers only when you have evidence-backed content:
-## Setup & Commands — Exact build/run commands from package.json, Makefile, pyproject.toml (e.g. `npm run build`, `uv run dev`). Omit if none.
-## Code Style & Patterns — Concrete patterns with file/symbol references (e.g. `src/api/user.py:get_user`). Omit if no clear signals.
-## Implementation Details — Entrypoints (`main.py`, `app.py`), module boundaries, key imports. Omit if nothing beyond the tree.
-
-Leave out any section that has no unique signal. No generic phrases without a concrete example.""",
-
-    "docs": """You are writing an Operational Manual for a **Technical Writer** in this directory (documentation). Focus on: tone of voice, formatting rules (Markdown/Docusaurus/etc.), and link-checking or lint-docs commands. Extract USEFUL, SPECIFIC information only; every bullet must reference a concrete path or command (in backticks).
-
-**Boundary:** Only write in Markdown; do not suggest code changes to application source. Stay within docs tooling and structure.
+**Format:** No ``` fences or pasted source. Playbooks ≤3-4 bullets per task (add route/service/test). No closing summaries or guideline wrap-ups.
 
 You MAY use these level-2 headers only when you have evidence-backed content:
-## Setup & Commands — How to build/serve the docs site, lint-docs, link-check (e.g. `npm run docs:build`, `mkdocs serve`). Omit if none.
-## Code Style & Patterns — Doc formatting rules, sidebar structure, cross-linking conventions. Omit if no clear signals.
-## Implementation Details — Docs framework (Docusaurus, MkDocs), config file location, asset layout. Omit if nothing specific.
+## Setup & Commands — Exact build/run/test commands from real files.
+## Code Style & Patterns — Must-follow rules with backticked proof.
+## Implementation Details — Entrypoints + compressed playbooks (3-4 bullets each).
 
-Leave out any section that has no unique signal. No generic phrases without a concrete example.""",
+Stay folder-scoped; omit weak sections.""",
 
-    "tests": """You are writing an Operational Manual for a **QA Engineer** in this directory (tests). Focus on: test framework used, how to run tests, and mocking strategy. Extract USEFUL, SPECIFIC information only; every bullet must reference a concrete path or command (in backticks).
+    "docs": """You are writing an Operational Manual for a **Technical Writer** in this directory (documentation). Dense imperative bullets only. Every bullet must reference a concrete path or command (in backticks).
 
-**Boundary:** Never modify source code to make tests pass. Only change test code, fixtures, or config. Preserve intended behavior.
+**Boundary:** Only write in Markdown; do not suggest application source edits.
 
-You MAY use these level-2 headers only when you have evidence-backed content:
-## Setup & Commands — How to run tests (e.g. `pytest tests/`, `npm run test`, `jest --config`). Include filter flags for specific suites. Omit if none.
-## Code Style & Patterns — Test naming, mock patterns (e.g. `tests/conftest.py`, `jest.mock`). Omit if no clear signals.
-## Implementation Details — Test layout, fixtures, coverage config. Omit if nothing specific.
-
-Leave out any section that has no unique signal. No generic phrases without a concrete example.""",
-
-    "infra": """You are writing an Operational Manual for a **DevOps Specialist** in this directory (scripts/infra). Focus on: environment variables, deployment safety, and CLI flag explanations. Extract USEFUL, SPECIFIC information only; every bullet must reference a concrete path or command (in backticks).
-
-**Boundary:** Do not change application code. Only modify scripts, Docker, CI, or Terraform. Call out destructive or irreversible actions.
+**Format:** No ``` fences or long prose. Playbooks ≤3-4 bullets per task (new page/section/link). No closing wrap-up paragraphs.
 
 You MAY use these level-2 headers only when you have evidence-backed content:
-## Setup & Commands — How to run scripts, deploy, or validate (e.g. `docker build`, `terraform plan`). Include required env vars. Omit if none.
-## Code Style & Patterns — Script conventions, config file locations. Omit if no clear signals.
-## Implementation Details — Pipeline stages, secrets handling, rollback steps. Omit if nothing specific.
+## Setup & Commands — Exact build/serve/lint/link-check commands.
+## Code Style & Patterns — Must-follow doc rules with backticked proof.
+## Implementation Details — Entry docs/config + compressed playbooks.
 
-Leave out any section that has no unique signal. No generic phrases without a concrete example.""",
+Stay folder-scoped; omit weak sections.""",
 
-    "generic": """You are writing an Operational Manual for an AI agent in this directory. No specific persona—extract whatever is useful from the file tree and contents. Every bullet must reference a concrete file path, command, or symbol (in backticks). No broad or vague statements.
+    "tests": """You are writing an Operational Manual for a **QA Engineer** in this directory (tests). Minimal text; how to run and where to add tests. Every bullet must reference a concrete path or command (in backticks).
+
+**Boundary:** Never modify production source to pass tests; tests/fixtures/config only.
+
+**Format:** No ``` fences or pasted test code. Playbooks ≤3-4 bullets per task (new case/fixture/suite). No meta sign-offs at the end.
 
 You MAY use these level-2 headers only when you have evidence-backed content:
-## Setup & Commands — Runnable commands from config files (package.json, Makefile, etc.). Omit if none.
-## Code Style & Patterns — Concrete patterns with file/symbol references. Omit if no clear signals.
-## Implementation Details — Entrypoints, key modules, how things are wired. Omit if nothing specific.
+## Setup & Commands — Exact test commands with scopes/filters when real.
+## Code Style & Patterns — Must-follow naming/mocking/fixture rules, backticked.
+## Implementation Details — Entry tests + compressed playbooks.
 
-Leave out any section that has no unique signal. No generic phrases without a concrete example.""",
+Stay folder-scoped; omit weak sections.""",
+
+    "infra": """You are writing an Operational Manual for a **DevOps Specialist** in this directory (scripts/infra). Imperative, minimal; env vars, order, commands. Every bullet must reference a concrete path or command (in backticks).
+
+**Boundary:** No application source edits—scripts, Docker, CI, Terraform only. Destructive ops: one backticked warning line.
+
+**Format:** No ``` fences. Playbooks ≤3-4 bullets per task. No closing essays.
+
+You MAY use these level-2 headers only when you have evidence-backed content:
+## Setup & Commands — Exact commands + required env vars.
+## Code Style & Patterns — Must-follow conventions, backticked.
+## Implementation Details — Entry files + compressed playbooks (job/env/rollout).
+
+Stay folder-scoped; omit weak sections.""",
+
+    "generic": """You are writing an Operational Manual for an AI coding agent in this directory. No persona—only explicit, folder-scoped actions. Every bullet must reference a concrete file path, command, or symbol (in backticks).
+
+**Format:** No ``` fences or pasted code. Bullets only where possible. Playbooks ≤3-4 bullets per task. No summary/closing fluff.
+
+You MAY use these level-2 headers only when you have evidence-backed content:
+## Setup & Commands — Exact commands from real files.
+## Code Style & Patterns — Must-follow constraints, backticked.
+## Implementation Details — Entrypoints + compressed playbooks.
+
+Stay folder-scoped; avoid generic phrases; omit weak sections.""",
 }
 
 
@@ -119,19 +139,22 @@ def _get_system_prompt_for_type(type_key: str, templates_dir: Optional[Path] = N
     """
     Return the system prompt for a directory type. If templates_dir is set and contains
     {type_key}.md or {type_key}.txt, use that file's content; otherwise use TYPE_SYSTEM_PROMPTS.
+    Empty template file content falls back to built-in prompt.
     """
     if templates_dir is not None and templates_dir.is_dir():
         for ext in (".md", ".txt"):
             path = templates_dir / f"{type_key}{ext}"
             if path.is_file():
-                return path.read_text(encoding="utf-8", errors="replace").strip()
+                content = path.read_text(encoding="utf-8", errors="replace").strip()
+                if content:
+                    return content
     return TYPE_SYSTEM_PROMPTS.get(type_key, AGENTS_MD_SYSTEM_PROMPT)
 
 
-def _classify_directory(dir_path: Path, repo_root: Path) -> tuple[str, str, str]:
+def _classify_directory(dir_path: Path, repo_root: Path) -> str:
     """
-    Classify directory into type based on path and contents. Returns (type_key, persona_name, persona_description).
-    Order: infra -> docs -> tests -> core (default).
+    Classify directory into type based on path and contents. Returns type_key.
+    Order: infra -> docs -> tests -> core -> generic.
     """
     try:
         rel_parts = dir_path.resolve().relative_to(repo_root.resolve()).parts
@@ -139,51 +162,43 @@ def _classify_directory(dir_path: Path, repo_root: Path) -> tuple[str, str, str]
         rel_parts = ()
     path_lower = "/".join(rel_parts).lower()
     try:
-        names = {p.name.lower() for p in dir_path.iterdir()}
-        files = [p.name.lower() for p in dir_path.iterdir() if p.is_file()]
+        entries = list(dir_path.iterdir())
+        names = {p.name.lower() for p in entries}
+        files = [p.name.lower() for p in entries if p.is_file()]
     except OSError:
         names = set()
         files = []
 
     # INFRA: path has scripts, infra, terraform; or has Dockerfile, .yml
     if any(p in path_lower for p in ("scripts", "infra", "terraform", ".github")):
-        meta = DIRECTORY_TYPE_META["infra"]
-        return ("infra", meta[1], meta[2])
+        return "infra"
     if "dockerfile" in names or any(f.endswith(".yml") or f.endswith(".yaml") for f in files):
-        meta = DIRECTORY_TYPE_META["infra"]
-        return ("infra", meta[1], meta[2])
+        return "infra"
 
     # DOCS: path has docs; or directory is mostly .md files
     if "docs" in path_lower:
-        meta = DIRECTORY_TYPE_META["docs"]
-        return ("docs", meta[1], meta[2])
+        return "docs"
     md_count = sum(1 for f in files if f.endswith(".md"))
     if md_count >= 2 and len(files) <= 10:
-        meta = DIRECTORY_TYPE_META["docs"]
-        return ("docs", meta[1], meta[2])
+        return "docs"
 
     # TESTS: path has tests, test, spec; or files like test_*.py, *.spec.*
     if any(p in path_lower for p in ("tests", "test", "spec", "__tests__")):
-        meta = DIRECTORY_TYPE_META["tests"]
-        return ("tests", meta[1], meta[2])
+        return "tests"
     if any(f.startswith("test_") or ".spec." in f for f in files):
-        meta = DIRECTORY_TYPE_META["tests"]
-        return ("tests", meta[1], meta[2])
+        return "tests"
 
     # CORE: only if strong signal—path is a known source root or dir has multiple source files
     source_roots = ("src", "app", "lib", "core", "packages", "pkg")
     if any(p in path_lower for p in source_roots):
-        meta = DIRECTORY_TYPE_META["core"]
-        return ("core", meta[1], meta[2])
+        return "core"
     source_extensions = (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java")
     source_count = sum(1 for f in files if any(f.endswith(ext) for ext in source_extensions))
     if source_count >= 2:
-        meta = DIRECTORY_TYPE_META["core"]
-        return ("core", meta[1], meta[2])
+        return "core"
 
     # GENERIC: fallback when nothing clearly fits (misc folders, config-only, single file, etc.)
-    meta = DIRECTORY_TYPE_META["generic"]
-    return ("generic", meta[1], meta[2])
+    return "generic"
 
 
 # Caps
@@ -284,11 +299,13 @@ def _parse_discovery_paths(completion: str, dir_path: Path) -> List[str]:
 
 
 def run_phase1_directory_selection(
-    client: OpenAI,
+    client: Optional[OpenAI],
     discovery_model: str,
     repo_root: Path,
 ) -> List[Path]:
     """Phase 1: one LLM call with full tree -> list of dirs that get AGENTS.md."""
+    if client is None:
+        return [repo_root]
     tree_text = get_tree(repo_root)
     try:
         resp = client.chat.completions.create(
@@ -308,13 +325,21 @@ def run_phase1_directory_selection(
 
 
 def run_phase2_discovery(
-    client: OpenAI,
+    client: Optional[OpenAI],
     discovery_model: str,
     dir_path: Path,
 ) -> Dict[str, str]:
     """Phase 2: discovery call for this dir -> file paths -> read_files_by_paths. Minimal fallback: README.md if present."""
+    if client is None:
+        paths: List[str] = ["README.md"] if (dir_path / "README.md").is_file() else []
+        return read_files_by_paths(
+            dir_path,
+            paths,
+            max_chars_per_file=MAX_CHARS_PER_FILE,
+            max_total_chars=MAX_TOTAL_CHARS_DISCOVERY,
+        )
     tree_text = get_tree(dir_path)
-    paths: List[str] = []
+    paths = []
     try:
         resp = client.chat.completions.create(
             model=discovery_model,
@@ -442,7 +467,7 @@ def generate_agents_md_with_llm(
     if is_root:
         system_prompt = ROOT_AGENTS_MD_SYSTEM_PROMPT
     else:
-        type_key, _, _ = _classify_directory(dir_path, repo_root)
+        type_key = _classify_directory(dir_path, repo_root)
         system_prompt = _get_system_prompt_for_type(type_key, templates_dir)
 
     def _wrap(body: str) -> str:
@@ -524,10 +549,22 @@ def _extract_summary(content: str, max_len: int = 120) -> str:
         if s.startswith("## "):
             continue
         return s.replace("#", "").strip()[:max_len]
+    # Fallback: skip headers and single markdown link lines; prefer line that contains a backtick
+    candidates: List[str] = []
     for line in lines:
         s = line.strip()
-        if s:
-            return s.replace("#", "").strip()[:max_len]
+        if not s:
+            continue
+        if s.startswith("## "):
+            continue
+        if s.startswith("- [") and "]" in s[3:] and ("(" in s or ")" in s):
+            continue
+        candidates.append(s.replace("#", "").strip()[:max_len])
+    if candidates:
+        for c in candidates:
+            if "`" in c:
+                return c
+        return candidates[0]
     return content.strip()[:max_len] if content else ""
 
 
@@ -581,7 +618,7 @@ def _merge_with_existing_agents_md(path: Path, regenerated: str) -> str:
         existing = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return regenerated
-    m = re.search(r"^(#{2,3})\s+Rules\s*$", existing, re.MULTILINE)
+    m = re.search(r"^(#{2,3})\s+Rules\s*$", existing, re.MULTILINE | re.IGNORECASE)
     if not m:
         return regenerated
     rules_block = existing[m.start() :].rstrip()
@@ -653,8 +690,6 @@ def cli(
 
     client = _get_openai_client(base_url)
     selected_dirs = run_phase1_directory_selection(client, discovery_model, repo_root)
-    if not client:
-        selected_dirs = [repo_root]
     console.print(f"[dim]Selected {len(selected_dirs)} directories for AGENTS.md[/dim]")
 
     agents_md_contents, folder_summaries = build_agents_md_contents(

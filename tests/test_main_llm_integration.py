@@ -9,10 +9,13 @@ from src.main import (
     _parse_discovery_paths,
     _classify_directory,
     _get_system_prompt_for_type,
+    _extract_summary,
+    _prune_sections,
     generate_agents_md_with_llm,
     build_agents_md_contents,
     write_context_files,
     _merge_with_existing_agents_md,
+    run_phase2_discovery,
 )
 
 
@@ -51,23 +54,13 @@ def test_classify_directory(tmp_path: Path) -> None:
     (repo / "docs").mkdir()
     (repo / "tests").mkdir()
     (repo / "scripts").mkdir()
-    type_key, persona, desc = _classify_directory(repo / "docs", repo)
-    assert type_key == "docs"
-    assert "Technical Writer" in persona
-    type_key, persona, desc = _classify_directory(repo / "tests", repo)
-    assert type_key == "tests"
-    assert "QA" in persona
-    type_key, persona, desc = _classify_directory(repo / "scripts", repo)
-    assert type_key == "infra"
-    type_key, persona, desc = _classify_directory(repo / "src", repo)
-    assert type_key == "core"
-    assert "Engineer" in persona
-    # Fallback: folder that doesn't fit docs/tests/infra/core -> generic
+    assert _classify_directory(repo / "docs", repo) == "docs"
+    assert _classify_directory(repo / "tests", repo) == "tests"
+    assert _classify_directory(repo / "scripts", repo) == "infra"
+    assert _classify_directory(repo / "src", repo) == "core"
     (repo / "misc").mkdir()
     (repo / "misc" / "readme.txt").write_text("hi", encoding="utf-8")
-    type_key, persona, desc = _classify_directory(repo / "misc", repo)
-    assert type_key == "generic"
-    assert "Agent" in persona or "General" in persona
+    assert _classify_directory(repo / "misc", repo) == "generic"
 
 
 def test_parse_discovery_paths(tmp_path: Path) -> None:
@@ -168,6 +161,8 @@ def test_write_context_files_emits_agents_md(tmp_path: Path) -> None:
     write_context_files(repo, selected, contents, summaries)
     assert (repo / "agents.md").exists()
     assert "table of contents" in (repo / "agents.md").read_text(encoding="utf-8").lower() or "Repository index" in (repo / "agents.md").read_text(encoding="utf-8")
+    assert (repo / "AGENTS.md").exists()
+    assert "Local Agent Context" in (repo / "AGENTS.md").read_text(encoding="utf-8")
 
 
 def test_write_context_files_backend_only_no_llms_txt(tmp_path: Path) -> None:
@@ -214,3 +209,63 @@ def test_merge_with_existing_agents_md_preserves_rules(tmp_path: Path) -> None:
     merged = _merge_with_existing_agents_md(agents_path, regenerated)
     assert "## Setup & Commands" in merged
     assert "- Keep me" in merged
+
+
+def test_extract_summary_prefers_substantive_line() -> None:
+    content = (
+        "### Local Agent Context: X\n\n"
+        "## Setup & Commands\n\n"
+        "- `pip install .`\n"
+    )
+    result = _extract_summary(content)
+    assert "pip" in result or "`pip" in result or "- " in result
+    assert result != "Setup & Commands"
+
+
+def test_extract_summary_fallback() -> None:
+    content = "### Local\n\n## A\n\n## B"
+    result = _extract_summary(content)
+    assert result.strip() in ("A", "B", "Local")
+
+
+def test_prune_sections_drops_weak_section() -> None:
+    md = (
+        "## First\n\n"
+        "One line only.\n\n"
+        "## Second\n\n"
+        "Body with `code` here.\n"
+    )
+    result = _prune_sections(md)
+    assert "## First" not in result
+    assert "One line only" not in result
+    assert "## Second" in result
+    assert "`code`" in result
+
+
+def test_get_system_prompt_for_type_empty_template_uses_builtin(tmp_path: Path) -> None:
+    templates_dir = tmp_path / "templates"
+    templates_dir.mkdir()
+    (templates_dir / "docs.md").write_text("", encoding="utf-8")
+    out = _get_system_prompt_for_type("docs", templates_dir)
+    assert "Technical Writer" in out
+    assert out.strip() != ""
+
+
+def test_merge_with_existing_agents_md_preserves_rules_case_insensitive(tmp_path: Path) -> None:
+    folder = tmp_path / "repo"
+    folder.mkdir()
+    agents_path = folder / "AGENTS.md"
+    agents_path.write_text(
+        "### Local Agent Context: X\n\n## Scope\n\n...\n\n## rules\n\n- Keep me\n",
+        encoding="utf-8",
+    )
+    regenerated = "### Local Agent Context: X\n\n## Scope\n\nNew\n\n## Setup & Commands\n\nFresh\n"
+    merged = _merge_with_existing_agents_md(agents_path, regenerated)
+    assert "- Keep me" in merged
+
+
+def test_run_phase2_discovery_no_client_returns_fallback(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Hello", encoding="utf-8")
+    result = run_phase2_discovery(None, "gpt-4o-mini", tmp_path)
+    assert isinstance(result, dict)
+    assert "README.md" in result

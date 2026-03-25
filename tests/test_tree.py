@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.tree import get_tree, list_directories, read_files_by_paths
+from src.tree import get_tree, read_files_by_paths
 
 
 def test_get_tree_basic(tmp_path: Path) -> None:
@@ -28,18 +28,6 @@ def test_get_tree_respects_gitignore(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("visible.py\n", encoding="utf-8")
     tree = get_tree(tmp_path)
     assert "visible.py" not in tree
-
-
-def test_list_directories(tmp_path: Path) -> None:
-    (tmp_path / "file.txt").write_text("", encoding="utf-8")
-    d1 = tmp_path / "dir1"
-    d1.mkdir()
-    d2 = tmp_path / "dir2"
-    d2.mkdir()
-    dirs = list_directories(tmp_path)
-    assert len(dirs) == 2
-    assert d1 in dirs
-    assert d2 in dirs
 
 
 def test_read_files_by_paths(tmp_path: Path) -> None:

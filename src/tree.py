@@ -1,5 +1,5 @@
 """
-Folder tree utilities: recursive tree as text, list dirs, read files by path.
+Folder tree utilities: recursive tree as text, read files by path.
 Respects .gitignore and default ignore dirs. No FolderInfo/FolderAnalysis.
 """
 from __future__ import annotations
@@ -30,8 +30,11 @@ def load_gitignore(root: Path) -> PathSpec | None:
     gitignore = root / ".gitignore"
     if not gitignore.exists():
         return None
-    patterns: Iterable[str] = gitignore.read_text().splitlines()
-    return PathSpec.from_lines("gitwildmatch", patterns)
+    try:
+        patterns: Iterable[str] = gitignore.read_text().splitlines()
+        return PathSpec.from_lines("gitwildmatch", patterns)
+    except Exception:
+        return None
 
 
 def is_ignored(path: Path, root: Path, spec: PathSpec | None) -> bool:
@@ -45,7 +48,7 @@ def is_ignored(path: Path, root: Path, spec: PathSpec | None) -> bool:
     return any(d in parts for d in DEFAULT_IGNORE_DIRS)
 
 
-def get_tree(root: Path, prefix: str = "") -> str:
+def get_tree(root: Path) -> str:
     """
     Recursive file tree as text for the given path. Respects .gitignore.
     Format: unicode tree like "├── file" and "└── dir/"
@@ -77,22 +80,8 @@ def get_tree(root: Path, prefix: str = "") -> str:
                 ext = "    " if is_last else "│   "
                 walk(sub_path, p + ext, False)
 
-    walk(root, prefix, prefix == "")
+    walk(root, "", True)
     return "\n".join(lines)
-
-
-def list_directories(root: Path) -> List[Path]:
-    """List direct subdirectory paths under root (respecting .gitignore)."""
-    root = root.resolve()
-    spec = load_gitignore(root)
-    result: List[Path] = []
-    try:
-        for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
-            if entry.is_dir() and not is_ignored(entry, root, spec):
-                result.append(entry)
-    except OSError:
-        pass
-    return result
 
 
 def read_files_by_paths(
