@@ -11,6 +11,7 @@ from src.main import (
     _get_system_prompt_for_type,
     _extract_summary,
     _prune_sections,
+    _limit_agents_md_body_lines,
     generate_agents_md_with_llm,
     build_agents_md_contents,
     write_context_files,
@@ -240,6 +241,19 @@ def test_prune_sections_drops_weak_section() -> None:
     assert "One line only" not in result
     assert "## Second" in result
     assert "`code`" in result
+
+
+def test_limit_agents_md_body_lines_noop_when_short() -> None:
+    s = "a\nb\nc"
+    assert _limit_agents_md_body_lines(s, max_lines=100) == s
+
+
+def test_limit_agents_md_body_lines_truncates() -> None:
+    long = "\n".join([f"line {i}" for i in range(150)])
+    out = _limit_agents_md_body_lines(long, max_lines=100)
+    assert "truncated" in out
+    assert "line 99" in out
+    assert "line 100" not in out.split("_…")[0]
 
 
 def test_get_system_prompt_for_type_empty_template_uses_builtin(tmp_path: Path) -> None:

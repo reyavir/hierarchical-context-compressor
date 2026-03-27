@@ -206,6 +206,8 @@ MAX_DIRS_PHASE1 = 15
 MAX_PATHS_DISCOVERY = 20
 MAX_CHARS_PER_FILE = 8000
 MAX_TOTAL_CHARS_DISCOVERY = 40000
+# Max lines for generated AGENTS.md **body** (before `### Local Agent Context` header). ~100 lines keeps files skimmable.
+MAX_AGENTS_MD_BODY_LINES = 100
 
 
 def is_web_app(repo_root: Path) -> bool:
@@ -447,6 +449,15 @@ def _prune_sections(md: str) -> str:
     return "\n".join(new_lines).rstrip()
 
 
+def _limit_agents_md_body_lines(md: str, max_lines: int = MAX_AGENTS_MD_BODY_LINES) -> str:
+    """Cap markdown body length (line count). Header is applied later by wrap_agents_md_header."""
+    lines = md.split("\n")
+    if len(lines) <= max_lines:
+        return md
+    kept = lines[:max_lines]
+    return "\n".join(kept).rstrip() + f"\n\n_… (truncated to {max_lines} lines)_\n"
+
+
 def generate_agents_md_with_llm(
     client: Optional[OpenAI],
     generation_model: str,
@@ -494,6 +505,7 @@ def generate_agents_md_with_llm(
             raise ValueError("Empty response")
         content = _drop_generic_bullets(content)
         content = _prune_sections(content)
+        content = _limit_agents_md_body_lines(content)
         return _wrap(content)
     except Exception as exc:
         console.print(f"[yellow]Generation failed for {rel}: {exc}[/yellow]")
