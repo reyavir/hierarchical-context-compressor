@@ -1,5 +1,7 @@
 # hierarchical-context-compressor
 
+![hcc — hierarchical context maps for AI agents](docs/hcc_image.png)
+
 CLI tool to generate AI-optimized hierarchical context maps for any codebase. Run it locally, or **do the same thing in GitHub Actions** as this repo: a workflow that checks out your code, installs `hcc`, runs it on `--root .`, and optionally commits the generated files (no separate Marketplace “action” required).
 
 - **All repos**: root **agents.md** (table of contents) plus per-directory **AGENTS.md** operational manuals.
