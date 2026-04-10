@@ -23,6 +23,18 @@ DEFAULT_IGNORE_DIRS: Set[str] = {
     "dist",
     "build",
     ".pytest_cache",
+    # Python tooling caches
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".eggs",
+    "htmlcov",
+    # Misc build/cache dirs common across ecosystems
+    ".cache",
+    ".parcel-cache",
+    ".next",
+    ".nuxt",
+    "coverage",
 }
 
 
