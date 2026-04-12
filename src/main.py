@@ -19,7 +19,22 @@ from .tree import get_tree, read_files_by_paths
 console = Console()
 
 # --- Phase 1: Directory selection ---
-DIRECTORY_SELECTION_SYSTEM = """You are given the full recursive file tree of a repository. Output a list of directory paths (one per line, relative to repo root) that should have their own AGENTS.md—e.g. substantial subprojects, docs, app source, scripts. Root must be included (use "." or empty for root). Output only paths, one per line, no explanation. Directories only, no files."""
+DIRECTORY_SELECTION_SYSTEM = """You are given the full recursive file tree of a repository. Output a list of directory paths (one per line, relative to repo root) that should have their own AGENTS.md. Root (".") must always be included.
+
+Select ONLY directories where an AI coding agent would actively write or modify code, config, or scripts:
+- Source code directories (app logic, services, modules, libraries)
+- CLI entry points and scripts
+- Infrastructure and build tooling directories
+- Configuration directories (if non-trivial)
+
+Do NOT select:
+- Directories containing only documentation, notes, or markdown files with no runnable code
+- Task-tracking, changelog, or archive directories
+- Data, fixture, or sample-data directories
+- Example or demo directories
+- Cache, build output, or generated artifact directories
+
+Output only paths, one per line, no explanation. Directories only, no files."""
 
 # --- Phase 2: Discovery (which files to read per dir) ---
 DISCOVERY_SYSTEM = """You are given the recursive file tree of one directory. Output a list of file paths (one per line, relative to this directory) that are essential to understand setup, commands, code style, and entry points (e.g. README, config, main source). Output only paths, one per line, no explanation."""
@@ -467,6 +482,7 @@ def generate_agents_md_with_llm(
     discovered_contents: Dict[str, str],
     is_root: bool,
     templates_dir: Optional[Path] = None,
+    max_lines: int = MAX_AGENTS_MD_BODY_LINES,
 ) -> str:
     """
     Generate AGENTS.md content for one directory. Root uses ToC prompt; nested uses three-section prompt.
@@ -505,7 +521,7 @@ def generate_agents_md_with_llm(
             raise ValueError("Empty response")
         content = _drop_generic_bullets(content)
         content = _prune_sections(content)
-        content = _limit_agents_md_body_lines(content)
+        content = _limit_agents_md_body_lines(content, max_lines)
         return _wrap(content)
     except Exception as exc:
         console.print(f"[yellow]Generation failed for {rel}: {exc}[/yellow]")
@@ -520,6 +536,7 @@ def build_agents_md_contents(
     discovery_model: str,
     generation_model: str,
     templates_dir: Optional[Path] = None,
+    max_lines: int = MAX_AGENTS_MD_BODY_LINES,
 ) -> tuple[Dict[Path, str], Dict[Path, str]]:
     """
     Run phase 2 and 3 for each selected dir. Returns (agents_md_contents, folder_summaries).
@@ -540,6 +557,7 @@ def build_agents_md_contents(
             discovered,
             is_root=is_root,
             templates_dir=templates_dir,
+            max_lines=max_lines,
         )
         contents[dir_path] = content
         summaries[dir_path] = _extract_summary(content)
@@ -684,6 +702,14 @@ def _merge_with_existing_agents_md(path: Path, regenerated: str) -> str:
     default=None,
     help="Directory with optional per-type templates: docs.md, tests.md, core.md, infra.md, generic.md. If present, used as the system prompt for that directory type.",
 )
+@click.option(
+    "--max-lines",
+    "max_lines",
+    type=int,
+    default=MAX_AGENTS_MD_BODY_LINES,
+    show_default=True,
+    help="Maximum number of lines per generated AGENTS.md body. Increase for large or complex directories.",
+)
 def cli(
     root_dir: Path,
     discovery_model: str,
@@ -692,6 +718,7 @@ def cli(
     base_url: Optional[str],
     dry_run: bool,
     templates_dir: Optional[Path],
+    max_lines: int,
 ) -> None:
     """Generate a hierarchical context map for a codebase (agents.md + AGENTS.md)."""
     if model:
@@ -705,7 +732,7 @@ def cli(
     console.print(f"[dim]Selected {len(selected_dirs)} directories for AGENTS.md[/dim]")
 
     agents_md_contents, folder_summaries = build_agents_md_contents(
-        repo_root, selected_dirs, client, discovery_model, generation_model, templates_dir
+        repo_root, selected_dirs, client, discovery_model, generation_model, templates_dir, max_lines
     )
 
     if dry_run:
