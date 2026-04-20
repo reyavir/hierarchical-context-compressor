@@ -217,7 +217,7 @@ def _classify_directory(dir_path: Path, repo_root: Path) -> str:
 
 
 # Caps
-MAX_DIRS_PHASE1 = 15
+DEFAULT_MAX_DIRS_PHASE1 = 15
 MAX_PATHS_DISCOVERY = 20
 MAX_CHARS_PER_FILE = 8000
 MAX_TOTAL_CHARS_DISCOVERY = 40000
@@ -273,7 +273,9 @@ def _get_openai_client(base_url: Optional[str] = None) -> Optional[OpenAI]:
     return OpenAI(api_key=api_key)
 
 
-def _parse_directory_selection(completion: str, repo_root: Path) -> List[Path]:
+def _parse_directory_selection(
+    completion: str, repo_root: Path, max_dirs: int = DEFAULT_MAX_DIRS_PHASE1
+) -> List[Path]:
     """Parse phase 1 response into list of Path; root always included; only existing dirs."""
     seen: set[str] = set()
     result: List[Path] = []
@@ -295,7 +297,7 @@ def _parse_directory_selection(completion: str, repo_root: Path) -> List[Path]:
             seen.add(rel)
     if repo_root not in result:
         result.insert(0, repo_root)
-    return result[:MAX_DIRS_PHASE1]
+    return result[:max_dirs]
 
 
 def _parse_discovery_paths(completion: str, dir_path: Path) -> List[str]:
@@ -319,6 +321,7 @@ def run_phase1_directory_selection(
     client: Optional[OpenAI],
     discovery_model: str,
     repo_root: Path,
+    max_dirs: int = DEFAULT_MAX_DIRS_PHASE1,
 ) -> List[Path]:
     """Phase 1: one LLM call with full tree -> list of dirs that get AGENTS.md."""
     if client is None:
@@ -335,7 +338,7 @@ def run_phase1_directory_selection(
         )
         content = (resp.choices[0].message.content or "").strip()
         if content:
-            return _parse_directory_selection(content, repo_root)
+            return _parse_directory_selection(content, repo_root, max_dirs=max_dirs)
     except Exception as e:
         console.print(f"[yellow]Phase 1 (directory selection) failed: {e}[/yellow]")
     return [repo_root]
@@ -710,6 +713,14 @@ def _merge_with_existing_agents_md(path: Path, regenerated: str) -> str:
     show_default=True,
     help="Maximum number of lines per generated AGENTS.md body. Increase for large or complex directories.",
 )
+@click.option(
+    "--max-dirs",
+    "max_dirs",
+    type=click.IntRange(min=1),
+    default=DEFAULT_MAX_DIRS_PHASE1,
+    show_default=True,
+    help="Maximum number of directories selected in phase 1 for AGENTS.md generation.",
+)
 def cli(
     root_dir: Path,
     discovery_model: str,
@@ -719,6 +730,7 @@ def cli(
     dry_run: bool,
     templates_dir: Optional[Path],
     max_lines: int,
+    max_dirs: int,
 ) -> None:
     """Generate a hierarchical context map for a codebase (agents.md + AGENTS.md)."""
     if model:
@@ -728,7 +740,9 @@ def cli(
     console.print(f"[bold]Scanning repository:[/bold] {repo_root}")
 
     client = _get_openai_client(base_url)
-    selected_dirs = run_phase1_directory_selection(client, discovery_model, repo_root)
+    selected_dirs = run_phase1_directory_selection(
+        client, discovery_model, repo_root, max_dirs=max_dirs
+    )
     console.print(f"[dim]Selected {len(selected_dirs)} directories for AGENTS.md[/dim]")
 
     agents_md_contents, folder_summaries = build_agents_md_contents(
