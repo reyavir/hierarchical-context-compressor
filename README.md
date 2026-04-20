@@ -71,6 +71,7 @@ hcc --root /path/to/repo --templates-dir .hcc/templates
 | `--base-url` | — | Custom API base URL (e.g. LiteLLM proxy). |
 | `--dry-run` | `false` | Do not write files; print a tree view. |
 | `--templates-dir` | — | Directory with optional per-type templates: `docs.md`, `tests.md`, `core.md`, `infra.md`, `generic.md`. If present, the file content is used as the system prompt for that directory type. |
+| `--max-dirs` | `15` | Maximum number of directories selected in phase 1 for AGENTS.md generation. Increase for large repos with many important code areas. |
 
 **Output size:** Each generated `AGENTS.md` **body** (everything below the `### Local Agent Context` header) is limited to **100 lines**; if the model returns more, the rest is cut and a short truncation note is appended.
 
