@@ -391,6 +391,42 @@ def filter_selected_dirs_for_changed_files(
     return filtered
 
 
+def build_selection_report(
+    repo_root: Path,
+    selected_before: List[Path],
+    selected_after: List[Path],
+    changed_only: bool,
+    changed_base: str,
+    changed_files: List[str],
+) -> Dict[str, object]:
+    def _rel(paths: List[Path]) -> List[str]:
+        out: List[str] = []
+        for p in paths:
+            if p.resolve() == repo_root.resolve():
+                out.append(".")
+            else:
+                out.append(p.resolve().relative_to(repo_root.resolve()).as_posix())
+        return out
+
+    return {
+        "repoRoot": str(repo_root),
+        "changedOnly": changed_only,
+        "changedBase": changed_base,
+        "changedFiles": changed_files,
+        "counts": {
+            "selectedBefore": len(selected_before),
+            "selectedAfter": len(selected_after),
+        },
+        "selectedDirectoriesBefore": _rel(selected_before),
+        "selectedDirectoriesAfter": _rel(selected_after),
+    }
+
+
+def write_selection_report(output_path: Path, payload: Dict[str, object]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def run_phase2_discovery(
     client: Optional[OpenAI],
     discovery_model: str,
@@ -781,6 +817,13 @@ def _merge_with_existing_agents_md(path: Path, regenerated: str) -> str:
     show_default=True,
     help="Git base ref used with --changed-only (diff range: <base>...HEAD).",
 )
+@click.option(
+    "--selection-report",
+    "selection_report",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Write selection diagnostics JSON to this path (selected dirs before/after filtering).",
+)
 def cli(
     root_dir: Path,
     discovery_model: str,
@@ -793,6 +836,7 @@ def cli(
     max_dirs: int,
     changed_only: bool,
     changed_base: str,
+    selection_report: Optional[Path],
 ) -> None:
     """Generate a hierarchical context map for a codebase (agents.md + AGENTS.md)."""
     if model:
@@ -805,6 +849,8 @@ def cli(
     selected_dirs = run_phase1_directory_selection(
         client, discovery_model, repo_root, max_dirs=max_dirs
     )
+    selected_before_filter = list(selected_dirs)
+    changed_files: List[str] = []
     if changed_only:
         try:
             changed_files = get_changed_files_since(repo_root, changed_base)
@@ -818,6 +864,17 @@ def cli(
             console.print(
                 f"[yellow]Changed-only mode failed ({e}); continuing with full selected directory set.[/yellow]"
             )
+    if selection_report is not None:
+        report = build_selection_report(
+            repo_root=repo_root,
+            selected_before=selected_before_filter,
+            selected_after=selected_dirs,
+            changed_only=changed_only,
+            changed_base=changed_base,
+            changed_files=changed_files,
+        )
+        write_selection_report(selection_report, report)
+        console.print(f"[dim]Selection report written: {selection_report}[/dim]")
     console.print(f"[dim]Selected {len(selected_dirs)} directories for AGENTS.md[/dim]")
 
     agents_md_contents, folder_summaries = build_agents_md_contents(

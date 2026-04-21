@@ -74,8 +74,41 @@ hcc --root /path/to/repo --templates-dir .hcc/templates
 | `--max-dirs` | `15` | Maximum number of directories selected in phase 1 for AGENTS.md generation. Increase for large repos with many important code areas. |
 | `--changed-only` | `false` | Regenerate AGENTS only for directories touched by git changes (plus their ancestors and root). Useful for faster incremental CI runs. |
 | `--changed-base` | `HEAD~1` | Git base ref used by `--changed-only` for diff range: `<base>...HEAD`. |
+| `--selection-report` | — | Write JSON diagnostics for directory selection (before/after filtering counts and directory lists). Helpful for CI debugging and tuning. |
 
 **Output size:** Each generated `AGENTS.md` **body** (everything below the `### Local Agent Context` header) is limited to **100 lines**; if the model returns more, the rest is cut and a short truncation note is appended.
+
+### Common workflows
+
+```bash
+# Full generation
+hcc --root .
+
+# Preview only (no writes)
+hcc --root . --dry-run
+
+# Incremental generation from git changes
+hcc --root . --changed-only --changed-base origin/main
+
+# Incremental generation + diagnostics report
+hcc --root . --changed-only --changed-base origin/main --selection-report .hcc/selection-report.json
+```
+
+When `--changed-only` is enabled, hcc computes changes with git diff range `<base>...HEAD`, keeps only selected directories that are ancestors of changed files, and always retains root (`.`).
+
+Example `--selection-report` payload:
+
+```json
+{
+  "changedOnly": true,
+  "changedBase": "origin/main",
+  "counts": {
+    "selectedBefore": 12,
+    "selectedAfter": 4
+  },
+  "selectedDirectoriesAfter": [".", "src", "src/api", "tests"]
+}
+```
 
 **Environment**
 

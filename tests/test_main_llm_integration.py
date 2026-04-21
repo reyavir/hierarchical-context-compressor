@@ -23,6 +23,8 @@ from src.main import (
     run_phase2_discovery,
     get_changed_files_since,
     filter_selected_dirs_for_changed_files,
+    build_selection_report,
+    write_selection_report,
 )
 
 
@@ -356,3 +358,74 @@ def test_cli_changed_only_filters_selected_dirs(monkeypatch, tmp_path: Path) -> 
     result = runner.invoke(cli, ["--root", str(repo), "--dry-run", "--changed-only"])
     assert result.exit_code == 0
     assert captured["selected"] == [repo, src]
+
+
+def test_build_selection_report_contains_counts(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src"
+    src.mkdir()
+    selected_before = [repo, src]
+    selected_after = [repo]
+    report = build_selection_report(
+        repo_root=repo,
+        selected_before=selected_before,
+        selected_after=selected_after,
+        changed_only=True,
+        changed_base="HEAD~1",
+        changed_files=["src/main.py"],
+    )
+    assert report["repoRoot"] == str(repo)
+    assert report["counts"]["selectedBefore"] == 2
+    assert report["counts"]["selectedAfter"] == 1
+    assert report["changedOnly"] is True
+
+
+def test_write_selection_report_writes_json(tmp_path: Path) -> None:
+    target = tmp_path / "out" / "selection-report.json"
+    payload = {"counts": {"selectedBefore": 3, "selectedAfter": 2}}
+    write_selection_report(target, payload)
+    text = target.read_text(encoding="utf-8")
+    assert "selectedBefore" in text
+    assert "selectedAfter" in text
+
+
+def test_cli_selection_report_writes_file(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src"
+    src.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+    report_path = tmp_path / "selection-report.json"
+
+    monkeypatch.setattr(main_mod, "_get_openai_client", lambda base_url=None: None)
+    monkeypatch.setattr(
+        main_mod,
+        "run_phase1_directory_selection",
+        lambda *args, **kwargs: [repo, src, docs],
+    )
+    monkeypatch.setattr(
+        main_mod, "get_changed_files_since", lambda *args, **kwargs: ["src/main.py"]
+    )
+    monkeypatch.setattr(main_mod, "render_tree", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        main_mod,
+        "build_agents_md_contents",
+        lambda *args, **kwargs: ({repo: "### Local Agent Context\n\n## Table of contents\n\n- x"}, {repo: "Root"}),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root",
+            str(repo),
+            "--dry-run",
+            "--changed-only",
+            "--selection-report",
+            str(report_path),
+        ],
+    )
+    assert result.exit_code == 0
+    assert report_path.exists()
+    assert '"selectedAfter": 2' in report_path.read_text(encoding="utf-8")
