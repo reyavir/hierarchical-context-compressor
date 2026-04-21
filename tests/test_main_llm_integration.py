@@ -4,7 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from click.testing import CliRunner
+
+import src.main as main_mod
 from src.main import (
+    cli,
     _parse_directory_selection,
     _parse_discovery_paths,
     _classify_directory,
@@ -17,6 +21,8 @@ from src.main import (
     write_context_files,
     _merge_with_existing_agents_md,
     run_phase2_discovery,
+    get_changed_files_since,
+    filter_selected_dirs_for_changed_files,
 )
 
 
@@ -283,3 +289,70 @@ def test_run_phase2_discovery_no_client_returns_fallback(tmp_path: Path) -> None
     result = run_phase2_discovery(None, "gpt-4o-mini", tmp_path)
     assert isinstance(result, dict)
     assert "README.md" in result
+
+
+def test_filter_selected_dirs_for_changed_files_keeps_ancestors(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src"
+    src.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+    api = src / "api"
+    api.mkdir()
+    selected = [repo, src, docs, api]
+    changed_files = ["src/api/handler.py"]
+    out = filter_selected_dirs_for_changed_files(selected, changed_files, repo)
+    assert out == [repo, src, api]
+
+
+def test_filter_selected_dirs_for_changed_files_no_matches_keeps_root(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src"
+    src.mkdir()
+    selected = [repo, src]
+    out = filter_selected_dirs_for_changed_files(selected, ["README.md"], repo)
+    assert out == [repo]
+
+
+def test_get_changed_files_since_parses_git_output(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    class FakeCompleted:
+        def __init__(self):
+            self.stdout = "src/main.py\ndocs/readme.md\n"
+
+    def fake_run(*args, **kwargs):
+        return FakeCompleted()
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+    out = get_changed_files_since(repo, "HEAD~1")
+    assert out == ["src/main.py", "docs/readme.md"]
+
+
+def test_cli_changed_only_filters_selected_dirs(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src"
+    src.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+
+    captured = {}
+    monkeypatch.setattr(main_mod, "_get_openai_client", lambda base_url=None: None)
+    monkeypatch.setattr(main_mod, "run_phase1_directory_selection", lambda *args, **kwargs: [repo, src, docs])
+    monkeypatch.setattr(main_mod, "get_changed_files_since", lambda *args, **kwargs: ["src/main.py"])
+    monkeypatch.setattr(main_mod, "render_tree", lambda *args, **kwargs: None)
+
+    def fake_build(*args, **kwargs):
+        selected_dirs = args[1]
+        captured["selected"] = selected_dirs
+        return ({repo: "### Local Agent Context\n\n## Table of contents\n\n- x"}, {repo: "Root"})
+
+    monkeypatch.setattr(main_mod, "build_agents_md_contents", fake_build)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(repo), "--dry-run", "--changed-only"])
+    assert result.exit_code == 0
+    assert captured["selected"] == [repo, src]

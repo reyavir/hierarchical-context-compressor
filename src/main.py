@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -342,6 +343,52 @@ def run_phase1_directory_selection(
     except Exception as e:
         console.print(f"[yellow]Phase 1 (directory selection) failed: {e}[/yellow]")
     return [repo_root]
+
+
+def get_changed_files_since(repo_root: Path, base_ref: str) -> List[str]:
+    """
+    Return changed file paths relative to repo_root for the git range base_ref...HEAD.
+    """
+    completed = subprocess.run(
+        ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+def filter_selected_dirs_for_changed_files(
+    selected_dirs: List[Path], changed_files: List[str], repo_root: Path
+) -> List[Path]:
+    """
+    Keep only selected directories that are ancestors of changed files.
+    Always include repo root if present in selected_dirs (or insert it).
+    """
+    ancestors: set[str] = {"."}
+    for rel_file in changed_files:
+        rel = rel_file.strip().lstrip("/")
+        if not rel:
+            continue
+        path = Path(rel)
+        parent = path.parent
+        while True:
+            parent_str = "." if str(parent) in ("", ".") else parent.as_posix()
+            ancestors.add(parent_str)
+            if parent_str == ".":
+                break
+            parent = parent.parent
+
+    filtered: List[Path] = []
+    for dir_path in selected_dirs:
+        rel_dir = "." if dir_path.resolve() == repo_root.resolve() else dir_path.resolve().relative_to(repo_root.resolve()).as_posix()
+        if rel_dir in ancestors:
+            filtered.append(dir_path)
+
+    if repo_root not in filtered:
+        filtered.insert(0, repo_root)
+    return filtered
 
 
 def run_phase2_discovery(
@@ -721,6 +768,19 @@ def _merge_with_existing_agents_md(path: Path, regenerated: str) -> str:
     show_default=True,
     help="Maximum number of directories selected in phase 1 for AGENTS.md generation.",
 )
+@click.option(
+    "--changed-only",
+    is_flag=True,
+    default=False,
+    help="Generate AGENTS.md only for directories affected by git changes and their ancestors.",
+)
+@click.option(
+    "--changed-base",
+    type=str,
+    default="HEAD~1",
+    show_default=True,
+    help="Git base ref used with --changed-only (diff range: <base>...HEAD).",
+)
 def cli(
     root_dir: Path,
     discovery_model: str,
@@ -731,6 +791,8 @@ def cli(
     templates_dir: Optional[Path],
     max_lines: int,
     max_dirs: int,
+    changed_only: bool,
+    changed_base: str,
 ) -> None:
     """Generate a hierarchical context map for a codebase (agents.md + AGENTS.md)."""
     if model:
@@ -743,6 +805,19 @@ def cli(
     selected_dirs = run_phase1_directory_selection(
         client, discovery_model, repo_root, max_dirs=max_dirs
     )
+    if changed_only:
+        try:
+            changed_files = get_changed_files_since(repo_root, changed_base)
+            selected_dirs = filter_selected_dirs_for_changed_files(
+                selected_dirs, changed_files, repo_root
+            )
+            console.print(
+                f"[dim]Changed-only mode: {len(changed_files)} changed file(s), {len(selected_dirs)} directory target(s)[/dim]"
+            )
+        except Exception as e:
+            console.print(
+                f"[yellow]Changed-only mode failed ({e}); continuing with full selected directory set.[/yellow]"
+            )
     console.print(f"[dim]Selected {len(selected_dirs)} directories for AGENTS.md[/dim]")
 
     agents_md_contents, folder_summaries = build_agents_md_contents(
